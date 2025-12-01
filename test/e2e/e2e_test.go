@@ -34,7 +34,7 @@ import (
 )
 
 // namespace where the project is deployed in
-const namespace = "mlflow-operator-system"
+const namespace = "opendatahub"
 
 // serviceAccountName created for the project
 const serviceAccountName = "mlflow-operator-controller-manager"
