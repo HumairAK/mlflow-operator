@@ -304,7 +304,37 @@ func (r *MLflowReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
+// conditionsChanged checks if the conditions in the new status differ from the current status
+func conditionsChanged(current, new []metav1.Condition) bool {
+	if len(current) != len(new) {
+		return true
+	}
+
+	// Create a map of current conditions for quick lookup
+	currentMap := make(map[string]metav1.Condition)
+	for _, cond := range current {
+		currentMap[cond.Type] = cond
+	}
+
+	// Check if any condition has changed
+	for _, newCond := range new {
+		currentCond, exists := currentMap[newCond.Type]
+		if !exists {
+			return true
+		}
+		// Compare relevant fields (ignore LastTransitionTime and ObservedGeneration)
+		if currentCond.Status != newCond.Status ||
+			currentCond.Reason != newCond.Reason ||
+			currentCond.Message != newCond.Message {
+			return true
+		}
+	}
+
+	return false
+}
+
 // updateStatus updates the MLflow status with retry on conflict
+// It only performs the update if conditions have actually changed
 func (r *MLflowReconciler) updateStatus(ctx context.Context, mlflow *mlflowv1.MLflow) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		// Get the latest version before updating
@@ -312,6 +342,13 @@ func (r *MLflowReconciler) updateStatus(ctx context.Context, mlflow *mlflowv1.ML
 		if err := r.Get(ctx, types.NamespacedName{Name: mlflow.Name, Namespace: mlflow.Namespace}, latest); err != nil {
 			return err
 		}
+
+		// Check if conditions have actually changed
+		if !conditionsChanged(latest.Status.Conditions, mlflow.Status.Conditions) {
+			// No changes, skip the update
+			return nil
+		}
+
 		// Copy the status from our in-memory version to the latest version
 		latest.Status = mlflow.Status
 		// Update the status
