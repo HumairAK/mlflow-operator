@@ -167,6 +167,9 @@ podSecurityContext:
 securityContext:
   allowPrivilegeEscalation: false
   readOnlyRootFilesystem: false
+  capabilities:
+    drop:
+      - ALL
 
 # Service configuration
 service:

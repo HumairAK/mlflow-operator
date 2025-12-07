@@ -17,11 +17,13 @@ limitations under the License.
 package e2e
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"text/template"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -342,6 +344,199 @@ spec: {}`
 				g.Expect(err).To(HaveOccurred(), "MLflow resource should not exist after deletion")
 			}
 			Eventually(verifyDeleted, 30*time.Second).Should(Succeed())
+		})
+
+		It("should deploy a minimal MLflow instance and verify functionality", func() {
+			const (
+				mlflowName      = "mlflow"
+				targetNamespace = "opendatahub"
+				timeout         = 5 * time.Minute
+			)
+
+			By("creating a minimal MLflow instance")
+			projectDir, err := utils.GetProjectDir()
+			Expect(err).NotTo(HaveOccurred())
+
+			mlflowManifestPath := filepath.Join(projectDir, "test/e2e/manifests/mlflow-minimal.yaml")
+			cmd := exec.Command("kubectl", "apply", "-f", mlflowManifestPath)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create MLflow resource")
+
+			By("waiting for MLflow resource to be created")
+			verifyMLflowCreated := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "mlflow", mlflowName, "-o", "jsonpath={.metadata.name}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal(mlflowName))
+			}
+			Eventually(verifyMLflowCreated, 30*time.Second).Should(Succeed())
+
+			By("waiting for MLflow deployment to be created")
+			verifyDeploymentCreated := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", mlflowName,
+					"-n", targetNamespace, "-o", "jsonpath={.metadata.name}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal(mlflowName))
+			}
+			Eventually(verifyDeploymentCreated, timeout).Should(Succeed())
+
+			By("waiting for MLflow pods to be ready")
+			verifyPodsReady := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", mlflowName,
+					"-n", targetNamespace,
+					"-o", "jsonpath={.status.readyReplicas}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("1"), "Expected 1 ready replica")
+			}
+			Eventually(verifyPodsReady, timeout, 5*time.Second).Should(Succeed())
+
+			By("verifying MLflow status conditions")
+			verifyStatusConditions := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "mlflow", mlflowName,
+					"-o", "jsonpath={.status.conditions[?(@.type=='Available')].status}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("True"), "MLflow should be Available")
+			}
+			Eventually(verifyStatusConditions, timeout, 5*time.Second).Should(Succeed())
+
+			By("getting the MLflow service endpoint")
+			var mlflowURL string
+			getServiceEndpoint := func(g Gomega) {
+				// Get service port
+				cmd := exec.Command("kubectl", "get", "service", mlflowName,
+					"-n", targetNamespace,
+					"-o", "jsonpath={.spec.ports[0].port}")
+				portOutput, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(portOutput).NotTo(BeEmpty())
+
+				mlflowURL = fmt.Sprintf("http://%s.%s.svc.cluster.local:%s",
+					mlflowName, targetNamespace, portOutput)
+			}
+			Eventually(getServiceEndpoint, 30*time.Second).Should(Succeed())
+
+			By("creating a test pod with MLflow client to test API")
+			// Clean up any existing test pod
+			cmd = exec.Command("kubectl", "delete", "pod", "mlflow-api-test",
+				"-n", targetNamespace, "--ignore-not-found=true")
+			_, _ = utils.Run(cmd)
+
+			// Wait for pod to be fully deleted
+			time.Sleep(5 * time.Second)
+
+			// Read and render test pod template with dynamic values
+			// Note: We need a temp file here because we're rendering a template
+			testPodTemplatePath := filepath.Join(projectDir, "test/e2e/manifests/test-pod.yaml.tmpl")
+			testPodTemplateContent, err := os.ReadFile(testPodTemplatePath)
+			Expect(err).NotTo(HaveOccurred(), "Failed to read test pod template")
+
+			tmpl, err := template.New("test-pod").Parse(string(testPodTemplateContent))
+			Expect(err).NotTo(HaveOccurred(), "Failed to parse test pod template")
+
+			var testPodManifest bytes.Buffer
+			templateData := map[string]string{
+				"Namespace":   targetNamespace,
+				"TrackingURI": mlflowURL,
+			}
+			err = tmpl.Execute(&testPodManifest, templateData)
+			Expect(err).NotTo(HaveOccurred(), "Failed to render test pod template")
+
+			testPodFile := filepath.Join("/tmp", "mlflow-test-pod.yaml")
+			err = os.WriteFile(testPodFile, testPodManifest.Bytes(), os.FileMode(0o644))
+			Expect(err).NotTo(HaveOccurred(), "Failed to write rendered test pod manifest")
+			defer func() {
+				if removeErr := os.Remove(testPodFile); removeErr != nil {
+					_, _ = fmt.Fprintf(GinkgoWriter, "failed to remove %s: %v\n", testPodFile, removeErr)
+				}
+			}()
+
+			By("creating ConfigMap with test script")
+			scriptPath := filepath.Join(projectDir, "test/scripts/test_mlflow_api.py")
+
+			cmd = exec.Command("kubectl", "create", "configmap", "mlflow-test-script",
+				"-n", targetNamespace,
+				"--from-file=test_mlflow_api.py="+scriptPath)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create ConfigMap")
+
+			By("running the test pod")
+			cmd = exec.Command("kubectl", "apply", "-f", testPodFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create test pod")
+
+			By("waiting for test pod to complete")
+			verifyTestPodComplete := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pod", "mlflow-api-test",
+					"-n", targetNamespace,
+					"-o", "jsonpath={.status.phase}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Or(Equal("Succeeded"), Equal("Failed")),
+					"Test pod should have completed")
+			}
+			Eventually(verifyTestPodComplete, 5*time.Minute, 10*time.Second).Should(Succeed())
+
+			By("checking test pod logs for success")
+			cmd = exec.Command("kubectl", "logs", "mlflow-api-test", "-n", targetNamespace)
+			testOutput, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to get test pod logs")
+			_, _ = fmt.Fprintf(GinkgoWriter, "Test output:\n%s\n", testOutput)
+
+			Expect(testOutput).To(ContainSubstring("All tests passed successfully!"),
+				"MLflow API tests should pass")
+			Expect(testOutput).To(ContainSubstring("Successfully connected to MLflow"),
+				"Should connect to MLflow")
+			Expect(testOutput).To(ContainSubstring("Created experiment"),
+				"Should create experiment")
+			Expect(testOutput).To(ContainSubstring("Created run"),
+				"Should create run")
+			Expect(testOutput).To(And(ContainSubstring("Logged"), ContainSubstring("parameters")),
+				"Should log parameters")
+			Expect(testOutput).To(And(ContainSubstring("Logged"), ContainSubstring("metrics")),
+				"Should log metrics")
+
+			By("verifying test pod succeeded")
+			cmd = exec.Command("kubectl", "get", "pod", "mlflow-api-test",
+				"-n", targetNamespace,
+				"-o", "jsonpath={.status.phase}")
+			podPhase, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(podPhase).To(Equal("Succeeded"), "Test pod should have succeeded")
+
+			By("cleaning up MLflow test resources")
+			// Clean up test pod
+			cmd = exec.Command("kubectl", "delete", "pod", "mlflow-api-test",
+				"-n", targetNamespace, "--ignore-not-found=true")
+			_, _ = utils.Run(cmd)
+
+			// Clean up ConfigMap
+			cmd = exec.Command("kubectl", "delete", "configmap", "mlflow-test-script",
+				"-n", targetNamespace, "--ignore-not-found=true")
+			_, _ = utils.Run(cmd)
+
+			// Clean up MLflow instance
+			cmd = exec.Command("kubectl", "delete", "mlflow", mlflowName, "--ignore-not-found=true")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to delete MLflow resource")
+
+			By("verifying MLflow resource was deleted")
+			verifyMLflowDeleted := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "mlflow", mlflowName)
+				_, err := utils.Run(cmd)
+				g.Expect(err).To(HaveOccurred(), "MLflow resource should be deleted")
+			}
+			Eventually(verifyMLflowDeleted, timeout).Should(Succeed())
+
+			By("verifying MLflow deployment was cleaned up")
+			verifyDeploymentDeleted := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", mlflowName, "-n", targetNamespace)
+				_, err := utils.Run(cmd)
+				g.Expect(err).To(HaveOccurred(), "Deployment should be deleted")
+			}
+			Eventually(verifyDeploymentDeleted, timeout).Should(Succeed())
 		})
 
 		// TODO: Customize the e2e test suite with scenarios specific to your project.

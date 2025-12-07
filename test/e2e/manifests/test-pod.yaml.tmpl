@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mlflow-api-test
+  namespace: {{ .Namespace }}
+spec:
+  restartPolicy: Never
+  containers:
+  - name: test
+    image: python:3.11-slim
+    command:
+    - /bin/bash
+    - -c
+    - |
+      pip install -q mlflow requests &&
+      python /scripts/test_mlflow_api.py --tracking-uri {{ .TrackingURI }}
+    volumeMounts:
+    - name: test-script
+      mountPath: /scripts
+  volumes:
+  - name: test-script
+    configMap:
+      name: mlflow-test-script
