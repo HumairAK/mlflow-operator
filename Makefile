@@ -2,6 +2,10 @@
 # Using localhost for local development and CI with kind clusters
 IMG ?= localhost/mlflow-operator:latest
 
+# MLflow image to use for e2e tests
+# Override with: make test-e2e MLFLOW_IMAGE=your-registry/mlflow:tag
+MLFLOW_IMAGE ?= quay.io/opendatahub/mlflow:latest
+
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
 GOBIN=$(shell go env GOPATH)/bin
@@ -84,7 +88,7 @@ build-and-load-image: ## Build the operator image and load it into the Kind clus
 
 .PHONY: test-e2e
 test-e2e: manifests generate fmt vet ## Run the e2e tests against an existing Kubernetes cluster.
-	IMG=$(E2E_IMG) go test ./test/e2e/ -v -ginkgo.v
+	IMG=$(E2E_IMG) MLFLOW_IMAGE=$(MLFLOW_IMAGE) go test ./test/e2e/ -v -ginkgo.v
 
 .PHONY: test-e2e-full
 test-e2e-full: setup-kind-cluster build-and-load-image test-e2e ## Run the complete e2e workflow: setup cluster, build/load image, and run tests.

@@ -5,15 +5,28 @@ metadata:
   namespace: {{ .Namespace }}
 spec:
   restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    seccompProfile:
+      type: RuntimeDefault
   containers:
   - name: test
-    image: python:3.11-slim
+    image: python:3.11
     command:
     - /bin/bash
     - -c
     - |
-      pip install -q mlflow requests &&
+      pip install --user -q git+https://github.com/opendatahub-io/mlflow.git &&
       python /scripts/test_mlflow_api.py --tracking-uri {{ .TrackingURI }}
+    env:
+    - name: HOME
+      value: /tmp
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
     volumeMounts:
     - name: test-script
       mountPath: /scripts

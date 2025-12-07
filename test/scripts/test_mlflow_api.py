@@ -19,6 +19,16 @@ def test_mlflow_connection(tracking_uri):
     """Test basic connection to MLflow tracking server."""
     print(f"Testing connection to MLflow at {tracking_uri}...")
     mlflow.set_tracking_uri(tracking_uri)
+
+    # Set a default workspace if workspaces are enabled
+    try:
+        workspace_name = "default"
+        print(f"Setting workspace to '{workspace_name}'...")
+        mlflow.set_workspace(workspace_name)
+        print(f"✓ Workspace set to '{workspace_name}'")
+    except Exception as e:
+        print(f"  Note: Could not set workspace ({e}), continuing without workspace")
+
     client = MlflowClient()
 
     try:

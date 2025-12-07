@@ -84,7 +84,9 @@ spec:
             {{- if .Values.mlflow.defaultArtifactRoot }}
             - --default-artifact-root={{ .Values.mlflow.defaultArtifactRoot }}
             {{- end }}
+            {{- if and .Values.kubeRbacProxy .Values.kubeRbacProxy.enabled }}
             - --app-name=kubernetes-auth
+            {{- end }}
             - --enable-workspaces
             - --workspace-store-uri={{ .Values.mlflow.workspaceStoreUri }}
             - --host=0.0.0.0

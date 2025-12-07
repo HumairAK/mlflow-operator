@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"text/template"
 	"time"
 
@@ -358,6 +359,51 @@ spec: {}`
 			Expect(err).NotTo(HaveOccurred())
 
 			mlflowManifestPath := filepath.Join(projectDir, "test/e2e/manifests/mlflow-minimal.yaml")
+
+			// Check if MLFLOW_IMAGE environment variable is set to override the image
+			mlflowImage := os.Getenv("MLFLOW_IMAGE")
+			if mlflowImage != "" {
+				By(fmt.Sprintf("Using custom MLflow image: %s", mlflowImage))
+				// Read the manifest
+				manifestBytes, err := os.ReadFile(mlflowManifestPath)
+				Expect(err).NotTo(HaveOccurred(), "Failed to read MLflow manifest")
+
+				// Replace the image in the YAML
+				// The structure is:
+				//   image:
+				//     image: quay.io/opendatahub/mlflow:latest
+				// We need to replace the nested "image:" line that has a value
+				manifestStr := string(manifestBytes)
+				lines := strings.Split(manifestStr, "\n")
+				for i, line := range lines {
+					// Look for "image: <value>" where value is not empty
+					// Skip lines with "imagePullPolicy"
+					if strings.Contains(line, "image:") && !strings.Contains(line, "imagePullPolicy") {
+						// Check if this line has a value after "image:"
+						parts := strings.SplitN(line, "image:", 2)
+						if len(parts) == 2 && strings.TrimSpace(parts[1]) != "" {
+							// This is the line with the actual image value
+							indent := parts[0] // Preserve original indentation
+							lines[i] = indent + "image: " + mlflowImage
+							break
+						}
+					}
+				}
+				manifestStr = strings.Join(lines, "\n")
+
+				// Write to temp file
+				tmpManifest := filepath.Join("/tmp", "mlflow-custom-image.yaml")
+				err = os.WriteFile(tmpManifest, []byte(manifestStr), os.FileMode(0o644))
+				Expect(err).NotTo(HaveOccurred(), "Failed to write modified manifest")
+				defer func() {
+					if removeErr := os.Remove(tmpManifest); removeErr != nil {
+						_, _ = fmt.Fprintf(GinkgoWriter, "failed to remove %s: %v\n", tmpManifest, removeErr)
+					}
+				}()
+
+				mlflowManifestPath = tmpManifest
+			}
+
 			cmd := exec.Command("kubectl", "apply", "-f", mlflowManifestPath)
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create MLflow resource")
@@ -539,15 +585,6 @@ spec: {}`
 			Eventually(verifyDeploymentDeleted, timeout).Should(Succeed())
 		})
 
-		// TODO: Customize the e2e test suite with scenarios specific to your project.
-		// Consider applying sample/CR(s) and check their status and/or verifying
-		// the reconciliation by using the metrics, i.e.:
-		// metricsOutput, err := getMetricsOutput()
-		// Expect(err).NotTo(HaveOccurred(), "Failed to retrieve logs from curl pod")
-		// Expect(metricsOutput).To(ContainSubstring(
-		//    fmt.Sprintf(`controller_runtime_reconcile_total{controller="%s",result="success"} 1`,
-		//    strings.ToLower(<Kind>),
-		// ))
 	})
 })
 
