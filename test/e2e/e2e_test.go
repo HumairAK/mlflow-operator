@@ -585,6 +585,239 @@ spec: {}`
 			Eventually(verifyDeploymentDeleted, timeout).Should(Succeed())
 		})
 
+		It("should deploy MLflow with kube-rbac-proxy and cert-manager", Label("rbac-proxy"), func() {
+			// Skip this test unless TEST_RBAC_PROXY is set to true
+			testRbacProxy := os.Getenv("TEST_RBAC_PROXY")
+			if testRbacProxy != "true" {
+				Skip("Skipping kube-rbac-proxy test (set TEST_RBAC_PROXY=true to enable)")
+			}
+
+			const (
+				mlflowName      = "mlflow"
+				targetNamespace = "opendatahub"
+				timeout         = 5 * time.Minute
+			)
+
+			By("creating the Certificate resource for TLS")
+			projectDir, err := utils.GetProjectDir()
+			Expect(err).NotTo(HaveOccurred())
+
+			certificatePath := filepath.Join(projectDir, "test/e2e/manifests/mlflow-certificate.yaml")
+			cmd := exec.Command("kubectl", "apply", "-f", certificatePath)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create Certificate resource")
+
+			By("waiting for certificate to be ready")
+			verifyCertReady := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "certificate", "mlflow-tls",
+					"-n", targetNamespace,
+					"-o", "jsonpath={.status.conditions[?(@.type=='Ready')].status}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("True"), "Certificate should be ready")
+			}
+			Eventually(verifyCertReady, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("verifying TLS secret was created by cert-manager")
+			cmd = exec.Command("kubectl", "get", "secret", "mlflow-tls", "-n", targetNamespace)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "TLS secret should exist")
+
+			By("creating MLflow instance with kube-rbac-proxy enabled")
+			mlflowManifestPath := filepath.Join(projectDir, "test/e2e/manifests/mlflow-rbac-proxy.yaml")
+
+			// Check if MLFLOW_IMAGE environment variable is set to override the image
+			mlflowImage := os.Getenv("MLFLOW_IMAGE")
+			if mlflowImage != "" {
+				By(fmt.Sprintf("Using custom MLflow image: %s", mlflowImage))
+				manifestBytes, err := os.ReadFile(mlflowManifestPath)
+				Expect(err).NotTo(HaveOccurred(), "Failed to read MLflow manifest")
+
+				manifestStr := string(manifestBytes)
+				lines := strings.Split(manifestStr, "\n")
+				for i, line := range lines {
+					if strings.Contains(line, "image:") && !strings.Contains(line, "imagePullPolicy") {
+						parts := strings.SplitN(line, "image:", 2)
+						if len(parts) == 2 && strings.TrimSpace(parts[1]) != "" {
+							indent := parts[0]
+							lines[i] = indent + "image: " + mlflowImage
+							break
+						}
+					}
+				}
+				manifestStr = strings.Join(lines, "\n")
+
+				tmpManifest := filepath.Join("/tmp", "mlflow-rbac-proxy-custom.yaml")
+				err = os.WriteFile(tmpManifest, []byte(manifestStr), os.FileMode(0o644))
+				Expect(err).NotTo(HaveOccurred(), "Failed to write modified manifest")
+				defer func() {
+					if removeErr := os.Remove(tmpManifest); removeErr != nil {
+						_, _ = fmt.Fprintf(GinkgoWriter, "failed to remove %s: %v\n", tmpManifest, removeErr)
+					}
+				}()
+
+				mlflowManifestPath = tmpManifest
+			}
+
+			cmd = exec.Command("kubectl", "apply", "-f", mlflowManifestPath)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create MLflow resource with kube-rbac-proxy")
+
+			By("waiting for MLflow deployment to be created")
+			verifyDeploymentCreated := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", mlflowName,
+					"-n", targetNamespace, "-o", "jsonpath={.metadata.name}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal(mlflowName))
+			}
+			Eventually(verifyDeploymentCreated, timeout).Should(Succeed())
+
+			By("verifying deployment has kube-rbac-proxy sidecar")
+			verifyRbacProxySidecar := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", mlflowName,
+					"-n", targetNamespace,
+					"-o", "jsonpath={.spec.template.spec.containers[*].name}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(ContainSubstring("kube-rbac-proxy"), "Deployment should have kube-rbac-proxy container")
+			}
+			Eventually(verifyRbacProxySidecar, 30*time.Second).Should(Succeed())
+
+			By("waiting for MLflow pods to be ready")
+			verifyPodsReady := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", mlflowName,
+					"-n", targetNamespace,
+					"-o", "jsonpath={.status.readyReplicas}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("1"), "Expected 1 ready replica")
+			}
+			Eventually(verifyPodsReady, timeout, 5*time.Second).Should(Succeed())
+
+			By("verifying TLS secret is mounted in kube-rbac-proxy container")
+			verifyTLSMount := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", mlflowName,
+					"-n", targetNamespace,
+					"-o", "jsonpath={.spec.template.spec.volumes[?(@.name=='tls')].secret.secretName}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("mlflow-tls"), "TLS secret should be mounted")
+			}
+			Eventually(verifyTLSMount, 30*time.Second).Should(Succeed())
+
+			By("getting service account token for authenticated access")
+			token, err := serviceAccountToken()
+			Expect(err).NotTo(HaveOccurred())
+			Expect(token).NotTo(BeEmpty())
+
+			By("testing authenticated access through kube-rbac-proxy")
+			// Clean up any existing test pod
+			cmd = exec.Command("kubectl", "delete", "pod", "rbac-proxy-test",
+				"-n", targetNamespace, "--ignore-not-found=true")
+			_, _ = utils.Run(cmd)
+
+			// Wait for pod to be fully deleted
+			time.Sleep(5 * time.Second)
+
+			// Create a test pod to access MLflow through kube-rbac-proxy
+			cmd = exec.Command("kubectl", "run", "rbac-proxy-test", "--restart=Never",
+				"--namespace", targetNamespace,
+				"--image=curlimages/curl:latest",
+				"--overrides",
+				fmt.Sprintf(`{
+					"spec": {
+						"containers": [{
+							"name": "curl",
+							"image": "curlimages/curl:latest",
+							"command": ["/bin/sh", "-c"],
+							"args": ["curl -v -k -H 'Authorization: Bearer %s' https://mlflow.%s.svc.cluster.local:8443/ && echo 'SUCCESS: Authenticated access works'"],
+							"securityContext": {
+								"readOnlyRootFilesystem": true,
+								"allowPrivilegeEscalation": false,
+								"capabilities": {
+									"drop": ["ALL"]
+								},
+								"runAsNonRoot": true,
+								"runAsUser": 1000,
+								"seccompProfile": {
+									"type": "RuntimeDefault"
+								}
+							}
+						}],
+						"serviceAccountName": "%s"
+					}
+				}`, token, targetNamespace, serviceAccountName))
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create rbac-proxy-test pod")
+
+			By("waiting for test pod to complete")
+			verifyTestPodComplete := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pod", "rbac-proxy-test",
+					"-n", targetNamespace,
+					"-o", "jsonpath={.status.phase}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Or(Equal("Succeeded"), Equal("Failed")),
+					"Test pod should have completed")
+			}
+			Eventually(verifyTestPodComplete, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+			By("verifying authenticated access succeeded")
+			cmd = exec.Command("kubectl", "logs", "rbac-proxy-test", "-n", targetNamespace)
+			testOutput, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to get test pod logs")
+			_, _ = fmt.Fprintf(GinkgoWriter, "RBAC Proxy test output:\n%s\n", testOutput)
+
+			Expect(testOutput).To(ContainSubstring("SUCCESS: Authenticated access works"),
+				"Should successfully access MLflow through kube-rbac-proxy")
+
+			By("verifying test pod succeeded")
+			cmd = exec.Command("kubectl", "get", "pod", "rbac-proxy-test",
+				"-n", targetNamespace,
+				"-o", "jsonpath={.status.phase}")
+			podPhase, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(podPhase).To(Equal("Succeeded"), "Test pod should have succeeded")
+
+			By("cleaning up test resources")
+			// Clean up test pod
+			cmd = exec.Command("kubectl", "delete", "pod", "rbac-proxy-test",
+				"-n", targetNamespace, "--ignore-not-found=true")
+			_, _ = utils.Run(cmd)
+
+			// Clean up MLflow instance
+			cmd = exec.Command("kubectl", "delete", "mlflow", mlflowName, "--ignore-not-found=true")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to delete MLflow resource")
+
+			// Clean up Certificate
+			cmd = exec.Command("kubectl", "delete", "certificate", "mlflow-tls",
+				"-n", targetNamespace, "--ignore-not-found=true")
+			_, _ = utils.Run(cmd)
+
+			// Clean up TLS secret (if not auto-deleted)
+			cmd = exec.Command("kubectl", "delete", "secret", "mlflow-tls",
+				"-n", targetNamespace, "--ignore-not-found=true")
+			_, _ = utils.Run(cmd)
+
+			By("verifying MLflow resource was deleted")
+			verifyMLflowDeleted := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "mlflow", mlflowName)
+				_, err := utils.Run(cmd)
+				g.Expect(err).To(HaveOccurred(), "MLflow resource should be deleted")
+			}
+			Eventually(verifyMLflowDeleted, timeout).Should(Succeed())
+
+			By("verifying MLflow deployment was cleaned up")
+			verifyDeploymentDeleted := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", mlflowName, "-n", targetNamespace)
+				_, err := utils.Run(cmd)
+				g.Expect(err).To(HaveOccurred(), "Deployment should be deleted")
+			}
+			Eventually(verifyDeploymentDeleted, timeout).Should(Succeed())
+		})
+
 	})
 })
 

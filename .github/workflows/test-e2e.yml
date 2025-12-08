@@ -50,3 +50,11 @@ jobs:
           make test-e2e
         env:
           IMG: ${{ env.IMG }}
+
+      - name: Setup cert-manager
+        run: make setup-cert-manager
+
+      - name: Run e2e tests with kube-rbac-proxy
+        run: make test-e2e-rbac-proxy
+        env:
+          IMG: ${{ env.IMG }}

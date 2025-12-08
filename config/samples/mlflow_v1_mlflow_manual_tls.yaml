@@ -10,7 +10,7 @@ spec:
   kubeRbacProxy:
     enabled: true
     image:
-      image: "gcr.io/kubebuilder/kube-rbac-proxy:v0.13.1"
+      image: "quay.io/opendatahub/odh-kube-auth-proxy:0.0.3"
       imagePullPolicy: IfNotPresent
     resources:
       requests:

@@ -1,0 +1,33 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: mlflow-tls
+  namespace: opendatahub
+spec:
+  # Secret name where cert-manager will store the certificate
+  secretName: mlflow-tls
+
+  # Duration and renewal settings
+  duration: 2160h  # 90 days
+  renewBefore: 360h  # 15 days
+
+  # Subject configuration
+  subject:
+    organizations:
+      - opendatahub
+
+  # Common name for the certificate
+  commonName: mlflow.opendatahub.svc.cluster.local
+
+  # DNS names for the certificate
+  dnsNames:
+    - mlflow
+    - mlflow.opendatahub
+    - mlflow.opendatahub.svc
+    - mlflow.opendatahub.svc.cluster.local
+
+  # Reference to the self-signed ClusterIssuer
+  issuerRef:
+    name: selfsigned-issuer
+    kind: ClusterIssuer
+    group: cert-manager.io

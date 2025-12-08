@@ -4,7 +4,7 @@ IMG ?= localhost/mlflow-operator:latest
 
 # MLflow image to use for e2e tests
 # Override with: make test-e2e MLFLOW_IMAGE=your-registry/mlflow:tag
-MLFLOW_IMAGE ?= quay.io/opendatahub/mlflow:latest
+MLFLOW_IMAGE ?= quay.io/opendatahub/mlflow:main
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -69,6 +69,8 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 # E2E test configuration
 KIND_CLUSTER ?= mlflow
 E2E_IMG ?= localhost/mlflow-operator:v0.0.1
+CERT_MANAGER_VERSION ?= v1.16.2
+TEST_RBAC_PROXY ?= false
 
 .PHONY: setup-kind-cluster
 setup-kind-cluster: ## Create a Kind cluster for e2e tests if it doesn't exist
@@ -101,6 +103,31 @@ cleanup-kind-cluster: ## Delete the Kind cluster used for e2e tests
 	else \
 		echo "Kind cluster '$(KIND_CLUSTER)' does not exist."; \
 	fi
+
+.PHONY: deploy-cert-manager
+deploy-cert-manager: ## Deploy cert-manager to the cluster
+	@echo "Deploying cert-manager $(CERT_MANAGER_VERSION)..."
+	$(KUBECTL) apply -f https://github.com/cert-manager/cert-manager/releases/download/$(CERT_MANAGER_VERSION)/cert-manager.yaml
+	@echo "Waiting for cert-manager to be ready..."
+	$(KUBECTL) wait --for=condition=available --timeout=300s deployment/cert-manager -n cert-manager
+	$(KUBECTL) wait --for=condition=available --timeout=300s deployment/cert-manager-webhook -n cert-manager
+	$(KUBECTL) wait --for=condition=available --timeout=300s deployment/cert-manager-cainjector -n cert-manager
+
+.PHONY: setup-cert-issuer
+setup-cert-issuer: ## Create a self-signed ClusterIssuer for tests
+	@echo "Creating self-signed ClusterIssuer..."
+	@printf 'apiVersion: cert-manager.io/v1\nkind: ClusterIssuer\nmetadata:\n  name: selfsigned-issuer\nspec:\n  selfSigned: {}\n' | $(KUBECTL) apply -f -
+
+.PHONY: setup-cert-manager
+setup-cert-manager: deploy-cert-manager setup-cert-issuer ## Deploy cert-manager and create ClusterIssuer
+
+.PHONY: test-e2e-rbac-proxy
+test-e2e-rbac-proxy: manifests generate fmt vet ## Run e2e tests with kube-rbac-proxy enabled
+	@echo "Running e2e tests with kube-rbac-proxy..."
+	IMG=$(E2E_IMG) MLFLOW_IMAGE=$(MLFLOW_IMAGE) TEST_RBAC_PROXY=true go test ./test/e2e/ -v -ginkgo.v -ginkgo.label-filter="rbac-proxy"
+
+.PHONY: test-e2e-rbac-proxy-full
+test-e2e-rbac-proxy-full: setup-kind-cluster build-and-load-image setup-cert-manager test-e2e-rbac-proxy ## Run complete e2e workflow with kube-rbac-proxy: setup cluster, cert-manager, and run tests
 
 .PHONY: validate-samples
 validate-samples: manifests ## Validate sample CRs against the CRD (requires kubectl access to a cluster)

@@ -1,0 +1,62 @@
+apiVersion: mlflow.opendatahub.io/v1
+kind: MLflow
+metadata:
+  name: mlflow
+spec:
+  # E2E testing configuration with kube-rbac-proxy enabled
+  # Requires cert-manager to provision TLS certificates
+
+  # Enable kube-rbac-proxy for authenticated access
+  kubeRbacProxy:
+    enabled: true
+    image:
+      image: "quay.io/opendatahub/odh-kube-auth-proxy@sha256:c53089c03a7d6ccde74e0a934d7c81b40bdc0895158b226693f82384b958b5de"
+      imagePullPolicy: IfNotPresent
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "256Mi"
+      limits:
+        cpu: "100m"
+        memory: "256Mi"
+    # TLS configuration using cert-manager generated certificate
+    tls:
+      secretName: mlflow-tls
+
+  # MLflow container image
+  image:
+    image: quay.io/opendatahub/mlflow:latest
+    imagePullPolicy: Always
+
+  # Single replica for testing
+  replicas: 1
+
+  # Minimal resources
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+  # Local file-based storage with PVC
+  storage:
+    accessModes:
+      - ReadWriteOnce
+    resources:
+      requests:
+        storage: 5Gi
+
+  # SQLite backend for simplicity
+  backendStoreUri: "sqlite:////mlflow/mlflow.db"
+  registryStoreUri: "sqlite:////mlflow/mlflow.db"
+  artifactsDestination: "file:///mlflow/artifacts"
+
+  # Required for file-based artifact storage
+  serveArtifacts: true
+
+  # Enable debug logging for troubleshooting
+  env:
+    - name: MLFLOW_LOGGING_LEVEL
+      value: DEBUG
