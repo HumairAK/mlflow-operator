@@ -48,7 +48,9 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
+	modulev1alpha1 "github.com/opendatahub-io/mlflow-operator/api/components/v1alpha1"
 	mlflowv1 "github.com/opendatahub-io/mlflow-operator/api/v1"
+	"github.com/opendatahub-io/mlflow-operator/internal/config"
 	"github.com/opendatahub-io/mlflow-operator/internal/controller"
 	// +kubebuilder:scaffold:imports
 )
@@ -60,11 +62,21 @@ var (
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(modulev1alpha1.AddToScheme(scheme))
 	utilruntime.Must(mlflowv1.AddToScheme(scheme))
 	utilruntime.Must(consolev1.AddToScheme(scheme))
 	utilruntime.Must(monitoringv1.AddToScheme(scheme))
 	utilruntime.Must(gatewayv1.Install(scheme))
 	// +kubebuilder:scaffold:scheme
+}
+
+func resolveManagerNamespace(namespace string, operatorConfig *config.OperatorConfig) string {
+	if operatorConfig != nil &&
+		operatorConfig.EnableMLflowOperatorModuleController &&
+		operatorConfig.ApplicationsNamespace != "" {
+		return operatorConfig.ApplicationsNamespace
+	}
+	return namespace
 }
 
 // nolint:gocyclo
@@ -96,6 +108,8 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	operatorConfig := config.GetConfig()
+	namespace = resolveManagerNamespace(namespace, operatorConfig)
 
 	// Validate namespace flag
 	if namespace == "" {
@@ -279,6 +293,18 @@ func main() {
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "MLflow")
 		os.Exit(1)
+	}
+	// Only turn on the new MLflowOperator ownership path during the coordinated ODH handoff.
+	if operatorConfig.EnableMLflowOperatorModuleController {
+		if err := (&controller.MLflowOperatorReconciler{
+			Client: mgr.GetClient(),
+			Scheme: mgr.GetScheme(),
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create controller", "controller", "MLflowOperator")
+			os.Exit(1)
+		}
+	} else {
+		setupLog.Info("MLflowOperator controller disabled; keeping legacy module ownership path inactive")
 	}
 	// +kubebuilder:scaffold:builder
 

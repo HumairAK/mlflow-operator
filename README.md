@@ -95,6 +95,22 @@ You can customize the gateway name and namespace if needed:
 make deploy-to-platform ODH_GATEWAY_NAME=my-gateway ODH_GATEWAY_NAMESPACE=my-namespace IMG=<some-registry>/mlflow-operator:tag
 ```
 
+### MLflowOperator module handoff
+
+`mlflow-operator` now also carries the cluster-scoped singleton `MLflowOperator` API at `components.platform.opendatahub.io/v1alpha1`. The corresponding controller path is guarded by `ENABLE_MLFLOW_OPERATOR_MODULE_CONTROLLER` and remains disabled by default so releases can ship safely before the coordinating ODH module-handler change lands.
+
+When that toggle is disabled, legacy platform behavior continues to rely on the existing env/flag contract such as `MLFLOW_URL`, `GATEWAY_NAME`, and `--namespace`. `RELATED_IMAGE_ODH_MLFLOW_IMAGE` remains the platform image override in both paths, and `APPLICATIONS_NAMESPACE` remains a deployment/startup input instead of a module-CR field.
+
+When `ENABLE_MLFLOW_OPERATOR_MODULE_CONTROLLER` is enabled, the singleton `MLflowOperator` CR adds projected platform fields on top of that deployment contract:
+
+- `APPLICATIONS_NAMESPACE` for startup-time operand targeting
+- `RELATED_IMAGE_ODH_MLFLOW_IMAGE` for the default MLflow runtime image
+- the singleton `MLflowOperator` spec for projected platform fields such as gateway domain
+
+`APPLICATIONS_NAMESPACE` is consumed directly from the operator Deployment so the process, cache, and namespace-scoped RBAC all agree on one target namespace. The `MLflowOperator` CR no longer carries a separate `applicationsNamespace` field, and only projected gateway fields are overlaid from the module CR during the gated handoff path.
+
+`RELATED_IMAGE_ODH_MLFLOW_IMAGE` is only the platform override. The vendored `MLFLOW_IMAGE` default in `config/base/params.env` remains the operator's baseline fallback and is still expected to exist for standalone and non-ODH deployment paths.
+
 **Option 4: Deploy to local Kind cluster**
 
 For local development and testing, you can deploy the MLflow operator to a Kind (Kubernetes IN Docker) cluster with various storage backend configurations:
@@ -289,7 +305,7 @@ For ODH/RHOAI MLflow images that ship `mlflow.store.db.migration_gap`, that Job 
 
 The operator automatically configures `MLFLOW_SERVER_CORS_ALLOWED_ORIGINS` with safe defaults:
 - Kubernetes service names (short, namespaced, and FQDN forms)
-- The data science gateway domain (from the operator's `MLFLOW_URL` env var)
+- The data science gateway base URL (from `MLFLOW_URL`, or from the singleton `MLflowOperator` gateway projection when the module-controller handoff is enabled)
 - `localhost` and `127.0.0.1` (for development and Kind integration tests)
 
 To allow additional origins, use `extraAllowedOrigins` in the MLflow CR:
