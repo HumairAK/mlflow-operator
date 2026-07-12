@@ -473,6 +473,7 @@ spec:
 					"--timeout=3m",
 				)
 				_, _ = utils.Run(waitCmd)
+				controllerPodName = waitForControllerPodName()
 			})
 
 			By("waiting for the controller rollout to finish after the env change")
@@ -660,6 +661,146 @@ spec:
 				g.Expect(getErr).NotTo(HaveOccurred())
 				g.Expect(output).To(BeEmpty())
 			}, 3*time.Minute, time.Second).Should(Succeed())
+		})
+
+		It("should validate CEL constraint for trace archival with file-based location", func() {
+			By("waiting for the controller-manager pod to be running")
+			controllerPodName = waitForControllerPodName()
+
+			By("attempting to create MLflow with file-based trace archival location without storage")
+			invalidArchivalYAML := `apiVersion: mlflow.opendatahub.io/v1
+kind: MLflow
+metadata:
+  name: mlflow
+spec:
+  serveArtifacts: true
+  artifactsDestination: s3://mlflow-artifacts/test
+  backendStoreUri: postgresql://user:pass@db:5432/mlflow
+  traceArchival:
+    enabled: true
+    schedule: "*/5 * * * *"
+    location: "file:///mlflow/traces"
+    retention: "30d"`
+
+			invalidArchivalFile := filepath.Join("/tmp", "mlflow-archival-invalid.yaml")
+			err := os.WriteFile(invalidArchivalFile, []byte(invalidArchivalYAML), os.FileMode(0o644))
+			Expect(err).NotTo(HaveOccurred(), "Failed to write invalid trace archival manifest")
+			defer func() {
+				if removeErr := os.Remove(invalidArchivalFile); removeErr != nil {
+					_, _ = fmt.Fprintf(GinkgoWriter, "failed to remove %s: %v\n", invalidArchivalFile, removeErr)
+				}
+			}()
+
+			cmd := exec.Command("kubectl", "apply", "-f", invalidArchivalFile)
+			output, err := utils.Run(cmd)
+			Expect(err).To(HaveOccurred(), "Should fail to create MLflow with file-based archival location without storage")
+			Expect(output).To(ContainSubstring("storage must be configured when traceArchival.location uses file-based storage"),
+				"Error message should indicate trace archival location requires storage")
+		})
+
+		It("should accept trace archival with S3 location and create CronJob", func() {
+			By("waiting for the controller-manager pod to be running")
+			controllerPodName = waitForControllerPodName()
+
+			By("creating the TLS secret required by the MLflow deployment and migration Job on Kind")
+			tlsSecretYAML := `apiVersion: v1
+kind: Secret
+metadata:
+  name: mlflow-tls
+  namespace: ` + namespace + `
+type: kubernetes.io/tls
+data:
+  tls.crt: ZHVtbXk=
+  tls.key: ZHVtbXk=`
+
+			tlsSecretFile := filepath.Join("/tmp", "mlflow-trace-archival-tls-secret.yaml")
+			err := os.WriteFile(tlsSecretFile, []byte(tlsSecretYAML), os.FileMode(0o644))
+			Expect(err).NotTo(HaveOccurred(), "Failed to write TLS secret manifest")
+			defer func() {
+				if removeErr := os.Remove(tlsSecretFile); removeErr != nil {
+					_, _ = fmt.Fprintf(GinkgoWriter, "failed to remove %s: %v\n", tlsSecretFile, removeErr)
+				}
+			}()
+
+			cmd := exec.Command("kubectl", "apply", "-f", tlsSecretFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create mlflow-tls secret")
+
+			By("creating MLflow with S3-based trace archival location")
+			validArchivalYAML := `apiVersion: mlflow.opendatahub.io/v1
+kind: MLflow
+metadata:
+  name: mlflow
+spec:
+  serveArtifacts: true
+  artifactsDestination: s3://mlflow-artifacts/test
+  backendStoreUri: postgresql://user:pass@db:5432/mlflow
+  traceArchival:
+    enabled: true
+    schedule: "*/5 * * * *"
+    location: "s3://mlflow-trace-archive"
+    retention: "30d"
+    maxTracesPerPass: 500`
+
+			validArchivalFile := filepath.Join("/tmp", "mlflow-archival-valid.yaml")
+			err = os.WriteFile(validArchivalFile, []byte(validArchivalYAML), os.FileMode(0o644))
+			Expect(err).NotTo(HaveOccurred(), "Failed to write valid trace archival manifest")
+			defer func() {
+				if removeErr := os.Remove(validArchivalFile); removeErr != nil {
+					_, _ = fmt.Fprintf(GinkgoWriter, "failed to remove %s: %v\n", validArchivalFile, removeErr)
+				}
+			}()
+
+			cmd = exec.Command("kubectl", "apply", "-f", validArchivalFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create MLflow with S3-based trace archival")
+
+			By("verifying the ConfigMap was created")
+			verifyConfigMap := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "configmap",
+					"mlflow-trace-archival-config", "-n", namespace,
+					"-o", "jsonpath={.data.trace-archival\\.yaml}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(ContainSubstring("enabled: true"))
+				g.Expect(output).To(ContainSubstring(`location: "s3://mlflow-trace-archive"`))
+				g.Expect(output).To(ContainSubstring(`retention: "30d"`))
+			}
+			Eventually(verifyConfigMap, 2*time.Minute).Should(Succeed())
+
+			By("verifying the CronJob was created")
+			verifyCronJob := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "cronjob",
+					"mlflow-trace-archival", "-n", namespace,
+					"-o", "jsonpath={.spec.schedule}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("*/5 * * * *"))
+			}
+			Eventually(verifyCronJob, 2*time.Minute).Should(Succeed())
+
+			By("verifying the Deployment keeps JOB_EXECUTION=false")
+			verifyDeploymentEnv := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "deployment", "mlflow",
+					"-n", namespace,
+					"-o", "jsonpath={.spec.template.spec.containers[0].env[?(@.name=='MLFLOW_SERVER_ENABLE_JOB_EXECUTION')].value}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("false"))
+			}
+			Eventually(verifyDeploymentEnv, 2*time.Minute).Should(Succeed())
+
+			By("cleaning up")
+			cmd = exec.Command("kubectl", "delete", "mlflow", "mlflow")
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+
+			verifyDeleted := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "mlflow", "mlflow")
+				_, err := utils.Run(cmd)
+				g.Expect(err).To(HaveOccurred())
+			}
+			Eventually(verifyDeleted, 30*time.Second).Should(Succeed())
 		})
 
 		// TODO: Customize the e2e test suite with scenarios specific to your project.
