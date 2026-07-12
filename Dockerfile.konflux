@@ -1,0 +1,50 @@
+# Build the manager binary
+FROM registry.access.redhat.com/ubi9/go-toolset@sha256:83cfd595f20e494cea9dc6526f217441e60bb9c5da85b33157c761e5f6a3d852 AS builder
+ARG TARGETOS
+ARG TARGETARCH
+ARG SUPPORTED_MLFLOW_VERSION_OVERRIDE=""
+
+USER root
+
+WORKDIR /workspace
+# Copy the Go Modules manifests
+COPY go.mod go.mod
+COPY go.sum go.sum
+# Copy the API module (required for replace directive in go.mod)
+COPY api/go.mod api/go.mod
+COPY api/go.sum api/go.sum
+# cache deps before building and copying source so that we don't need to re-download as much
+# and so that source changes don't invalidate our downloaded layer
+RUN go mod download
+
+# Copy the Go source (relies on .dockerignore to filter)
+COPY . .
+
+# Build
+# the GOARCH has no default value to allow the binary to be built according to the host where the command
+# was called. For example, if we call make docker-build in a local env which has the Apple Silicon M1 SO
+# the docker BUILDPLATFORM arg will be linux/arm64 when for Apple x86 it will be linux/amd64. Therefore,
+# by leaving it empty we can ensure that the container and binary shipped on it will have the same platform.
+RUN SUPPORTED_MLFLOW_VERSION="$(SUPPORTED_MLFLOW_VERSION_OVERRIDE="${SUPPORTED_MLFLOW_VERSION_OVERRIDE}" make -s print-supported-mlflow-version)" && \
+    test -n "${SUPPORTED_MLFLOW_VERSION}" && \
+    GO_LDFLAGS="-X github.com/opendatahub-io/mlflow-operator/internal/controller.SupportedMLflowVersion=${SUPPORTED_MLFLOW_VERSION}" && \
+      CGO_ENABLED=1 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} GO111MODULE=on \
+        GOEXPERIMENT=strictfipsruntime go build -ldflags "${GO_LDFLAGS}" -tags strictfipsruntime -a -o manager cmd/main.go
+
+FROM registry.access.redhat.com/ubi9/ubi-minimal@sha256:463cae32c6f6f5594b11a5c22de275016bd8545ce58a6373388e8b24f13fc15c
+WORKDIR /
+COPY --from=builder /workspace/manager .
+COPY --from=builder /workspace/charts/mlflow charts/mlflow
+
+USER 1001
+ENTRYPOINT ["/manager"]
+
+LABEL com.redhat.component="odh-mlflow-operator-rhel9" \
+      name="rhoai/odh-mlflow-operator-rhel9" \
+      description="odh-mlflow-operator-rhel9" \
+      summary="odh-mlflow-operator-rhel9" \
+      maintainer="['managed-open-data-hub@redhat.com']" \
+      io.openshift.expose-services="" \
+      io.k8s.display-name="odh-mlflow-operator-rhel9" \
+      io.k8s.description="odh-mlflow-operator-rhel9" \
+      com.redhat.license_terms="https://www.redhat.com/licenses/Red_Hat_Standard_EULA_20191108.pdf"
