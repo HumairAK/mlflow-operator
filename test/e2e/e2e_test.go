@@ -793,6 +793,18 @@ spec:
 			}
 			Eventually(verifyCronJob, 2*time.Minute).Should(Succeed())
 
+			By("verifying the CronJob uses python3.12")
+			verifyCronJobCommand := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "cronjob",
+					"mlflow-trace-archival", "-n", namespace,
+					"-o", "jsonpath={.spec.jobTemplate.spec.template.spec.containers[0].command}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(ContainSubstring("python3.12"))
+				g.Expect(output).To(ContainSubstring("run_trace_archival_scheduler"))
+			}
+			Eventually(verifyCronJobCommand, 2*time.Minute).Should(Succeed())
+
 			By("verifying the Deployment keeps JOB_EXECUTION=false")
 			verifyDeploymentEnv := func(g Gomega) {
 				cmd := exec.Command("kubectl", "get", "deployment", "mlflow",
