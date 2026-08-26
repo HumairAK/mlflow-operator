@@ -4,7 +4,8 @@ Creates several real traces, persists them as DB-backed spans via OTLP
 log_spans (prefixed tracking URI, then unprefixed Kind port-forward path),
 waits them past the harness-configured archival retention, runs a Job from
 the operator-managed CronJob template, then verifies that archive objects
-were written while the traces remain readable via MLflow.
+were written, traces remain readable via MLflow, and
+`SPANS_LOCATION=ARCHIVE_REPO`.
 """
 
 from __future__ import annotations

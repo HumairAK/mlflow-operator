@@ -31,6 +31,17 @@ def _assert_trace_payloads(observed_traces, expected_payloads: list[dict]) -> No
         )
 
 
+def _assert_spans_location(
+    observed_traces, expected_payloads: list[dict], location: str
+) -> None:
+    for payload in expected_payloads:
+        tags = dict(observed_traces[payload["trace_id"]].info.tags or {})
+        assert tags.get(TraceTagKey.SPANS_LOCATION) == location, (
+            f"Trace {payload['trace_id']} spans location is "
+            f"{tags.get(TraceTagKey.SPANS_LOCATION)!r}, expected {location}: {tags}"
+        )
+
+
 def _log_trace_diagnostics(label: str, observed_traces, expected_payloads: list[dict]) -> None:
     now_millis = int(time.time() * 1000)
     for payload in expected_payloads:
@@ -95,11 +106,7 @@ def validate_archival_traces_db_backed(test_context: TestContext) -> None:
     observed = state.get("observed_traces") or {}
     assert expected_payloads, "Archival smoke traces were not seeded"
     _assert_trace_payloads(observed, expected_payloads)
-    for payload in expected_payloads:
-        tags = dict(observed[payload["trace_id"]].info.tags or {})
-        assert tags.get(TraceTagKey.SPANS_LOCATION) == SpansLocation.TRACKING_STORE.value, (
-            f"Trace {payload['trace_id']} was not DB-backed after OTLP ingest: {tags}"
-        )
+    _assert_spans_location(observed, expected_payloads, SpansLocation.TRACKING_STORE.value)
     _log_trace_diagnostics("Pre-archival", observed, expected_payloads)
 
 
@@ -125,11 +132,12 @@ def validate_archive_objects_written(test_context: TestContext) -> None:
 
 
 def validate_archival_traces_readable(test_context: TestContext) -> None:
-    """Validate that archived traces remain readable with original payloads."""
+    """Validate that archived traces stay readable from ARCHIVE_REPO."""
     validate_no_error(test_context)
     state = test_context.archival_state
     expected_payloads = state.get("expected_payloads") or []
     observed = state.get("observed_traces") or {}
     assert expected_payloads, "Archival smoke traces were not seeded"
     _assert_trace_payloads(observed, expected_payloads)
+    _assert_spans_location(observed, expected_payloads, SpansLocation.ARCHIVE_REPO.value)
     _log_trace_diagnostics("Post-archival", observed, expected_payloads)

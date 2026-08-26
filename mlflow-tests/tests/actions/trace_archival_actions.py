@@ -128,7 +128,14 @@ def wait_for_expected_traces(admin_client, experiment_id: str, expected_trace_id
     )
 
 
-def wait_for_tracking_store_spans(admin_client, experiment_id: str, expected_trace_ids: set[str]):
+def wait_for_spans_location(
+    admin_client,
+    experiment_id: str,
+    expected_trace_ids: set[str],
+    location: str,
+    *,
+    failure_prefix: str,
+):
     deadline = time.monotonic() + TRACE_VISIBILITY_TIMEOUT_SECONDS
     last_tags: dict[str, dict] = {}
     while time.monotonic() < deadline:
@@ -139,7 +146,7 @@ def wait_for_tracking_store_spans(admin_client, experiment_id: str, expected_tra
                 continue
             tags = dict(trace.info.tags or {})
             last_tags[trace.info.trace_id] = tags
-            if tags.get(TraceTagKey.SPANS_LOCATION) != SpansLocation.TRACKING_STORE.value:
+            if tags.get(TraceTagKey.SPANS_LOCATION) != location:
                 continue
             if not trace.data.spans:
                 continue
@@ -149,8 +156,7 @@ def wait_for_tracking_store_spans(admin_client, experiment_id: str, expected_tra
         time.sleep(POLL_INTERVAL_SECONDS)
 
     pytest.fail(
-        "OTLP log_spans completed but traces were not DB-backed "
-        f"(wanted {TraceTagKey.SPANS_LOCATION}={SpansLocation.TRACKING_STORE.value}) "
+        f"{failure_prefix} (wanted {TraceTagKey.SPANS_LOCATION}={location}) "
         f"within {TRACE_VISIBILITY_TIMEOUT_SECONDS}s: {last_tags}"
     )
 
@@ -456,10 +462,12 @@ def action_persist_archival_spans_via_otlp(test_context: TestContext) -> None:
             test_context.active_workspace,
             payload["spans"],
         )
-    test_context.archival_state["observed_traces"] = wait_for_tracking_store_spans(
+    test_context.archival_state["observed_traces"] = wait_for_spans_location(
         test_context.user_client,
         test_context.active_experiment_id,
         test_context.archival_state["expected_trace_ids"],
+        SpansLocation.TRACKING_STORE.value,
+        failure_prefix="OTLP log_spans completed but traces were not DB-backed",
     )
 
 
@@ -525,8 +533,10 @@ def action_reload_archival_traces(test_context: TestContext) -> None:
     if not test_context.active_experiment_id:
         raise ValueError("test_context.active_experiment_id must be set before reloading archival traces")
 
-    test_context.archival_state["observed_traces"] = wait_for_expected_traces(
+    test_context.archival_state["observed_traces"] = wait_for_spans_location(
         test_context.user_client,
         test_context.active_experiment_id,
         test_context.archival_state["expected_trace_ids"],
+        SpansLocation.ARCHIVE_REPO.value,
+        failure_prefix="Archival Job completed but traces were not archive-backed",
     )
