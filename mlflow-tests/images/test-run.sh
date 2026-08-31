@@ -1008,6 +1008,11 @@ run_suite() {
             s3_endpoint_scheme="https"
         fi
         export MLFLOW_S3_ENDPOINT_URL="${MLFLOW_S3_ENDPOINT_URL:-${s3_endpoint_scheme}://localhost:9000}"
+    elif [ "$STORAGE_TYPE" = "externals3" ] && [ -n "${S3_ENDPOINT_URL:-}" ]; then
+        # Direct S3 clients read MLFLOW_S3_ENDPOINT_URL. The archival Job already
+        # receives S3_ENDPOINT_URL/AWS_DEFAULT_ENDPOINT via deploy.py; export the
+        # same resolved endpoint so object verification does not fall back to AWS.
+        export MLFLOW_S3_ENDPOINT_URL="${MLFLOW_S3_ENDPOINT_URL:-${S3_ENDPOINT_URL}}"
     fi
 
     # ── Kube token ──────────────────────────────────────────────────────────────
