@@ -936,6 +936,39 @@ data:
 				}
 			}, 2*time.Minute, time.Second).Should(Succeed())
 
+			By("verifying archival ClusterRoleBinding subject and Deployment config references are removed")
+			Eventually(func(g Gomega) {
+				subjects, crbErr := kubectlOutput(
+					"get", "clusterrolebinding", "mlflow",
+					"-o", "jsonpath={.subjects[*].name}",
+				)
+				g.Expect(crbErr).NotTo(HaveOccurred())
+				g.Expect(subjects).NotTo(ContainSubstring(archivalSAName))
+
+				configEnv, configErr := kubectlOutput(
+					"get", "deployment", "mlflow", "-n", namespace,
+					"-o", "jsonpath={.spec.template.spec.containers[0]"+
+						".env[?(@.name=='MLFLOW_TRACE_ARCHIVAL_CONFIG')].value}",
+				)
+				g.Expect(configErr).NotTo(HaveOccurred())
+				g.Expect(configEnv).To(BeEmpty(), "MLFLOW_TRACE_ARCHIVAL_CONFIG should be removed after archival is disabled")
+
+				mount, mountErr := kubectlOutput(
+					"get", "deployment", "mlflow", "-n", namespace,
+					"-o", "jsonpath={.spec.template.spec.containers[0]"+
+						".volumeMounts[?(@.name=='trace-archival-config')].name}",
+				)
+				g.Expect(mountErr).NotTo(HaveOccurred())
+				g.Expect(mount).To(BeEmpty(), "trace-archival-config volume mount should be removed after archival is disabled")
+
+				volume, volumeErr := kubectlOutput(
+					"get", "deployment", "mlflow", "-n", namespace,
+					"-o", "jsonpath={.spec.template.spec.volumes[?(@.name=='trace-archival-config')].name}",
+				)
+				g.Expect(volumeErr).NotTo(HaveOccurred())
+				g.Expect(volume).To(BeEmpty(), "trace-archival-config volume should be removed after archival is disabled")
+			}, 2*time.Minute, time.Second).Should(Succeed())
+
 			By("cleaning up")
 			cmd = exec.Command("kubectl", "delete", "mlflow", "mlflow")
 			_, err = utils.Run(cmd)
