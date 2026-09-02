@@ -67,6 +67,10 @@ The framework supports configuration via environment variables:
 | `DISABLE_TLS` | Disable TLS verification | `true` | Both |
 | `artifact_storage` | Artifact storage type (`s3` or `file`) | `file` | Both |
 | `serve_artifacts` | Whether MLflow serves artifacts | `true` | Both |
+| `artifacts_server` | Whether the dedicated artifact-server integration topology is deployed | `false` | K8s |
+| `artifacts_server_gateway` | Whether live Gateway rewrite assertions are enabled | `false` | K8s |
+| `MLFLOW_ARTIFACTS_URI` | Direct artifact-server base URI set by the harness | `""` | K8s |
+| `mlflow_namespace` | Namespace containing the MLflow Deployments | `opendatahub` | K8s |
 | `MLFLOW_S3_ENDPOINT_URL` | S3 endpoint URL | Optional | Both |
 | `AWS_ACCESS_KEY_ID` | AWS access key for S3 | Optional | Both |
 | `AWS_SECRET_ACCESS_KEY` | AWS secret key for S3 | Optional | Both |
@@ -110,6 +114,45 @@ uv run pytest --log-cli-level=INFO
 # Run specific test scenario
 uv run pytest tests/test_experiments.py -k "GET permission can get experiment"
 ```
+
+The operator GitHub workflow includes independent `ARTIFACTS_SERVER=true` PostgreSQL/file and
+PostgreSQL/S3 Kind rows. They install the repository's pinned `HTTPRoute` CRD before operator
+startup, provide the artifact TLS Secret, and port-forward the `mlflow-artifacts` Service. Both
+direct smoke tests cover workspace authentication, upload, listing, and download; the S3 row also
+covers multipart create/abort. A Gateway controller is not required.
+
+When invoking `images/test-run.sh` directly on Kind, install the CRD before the operator starts (or
+restart the operator after installation):
+
+```bash
+kubectl apply -f ../test/crd/httproutes.gateway.networking.k8s.io.yaml
+ARTIFACTS_SERVER=true \
+ARTIFACT_BACKENDS=file \
+BACKEND_STORE=postgres \
+REGISTRY_STORE=postgres \
+INFRASTRUCTURE_PLATFORM=base \
+bash images/test-run.sh -m "smoke and artifacts_server"
+```
+
+Set `ARTIFACT_BACKENDS=s3` for multipart coverage or `ARTIFACT_BACKENDS=file,s3` for a normal
+sequential run across both destinations. Upgrade phases and `SKIP_CLEANUP=true` require one backend.
+
+On OpenShift, enable the independent live Gateway rewrite assertions when the operator has the
+external `MLFLOW_URL` and `data-science-gateway` configured:
+
+```bash
+ARTIFACTS_SERVER=true \
+ARTIFACTS_SERVER_GATEWAY=true \
+ARTIFACT_BACKENDS=s3 \
+BACKEND_STORE=postgres \
+REGISTRY_STORE=postgres \
+INFRASTRUCTURE_PLATFORM=openshift \
+bash images/test-run.sh -m "smoke and artifacts_server"
+```
+
+The Gateway smoke test calls the UI list/download compatibility paths and multipart create/abort
+through the legacy tracking-relative proxy path, then verifies from access logs that the Gateway
+sent every request to the `mlflow-artifacts` Deployment.
 
 ### Running Upgrade Phase Tests
 
@@ -171,7 +214,8 @@ The framework defines the following custom pytest markers:
 - **`@pytest.mark.Models`**: Test registered model RBAC and management operations
 - **`@pytest.mark.Traces`**: Test direct trace-ingestion RBAC and experiment-scoped trace authorization
 - **`@pytest.mark.Artifacts`**: Test artifact operations, model logging, and S3 storage verification
-- **`@pytest.mark.smoke`**: Fast sanity-check tests suitable for pre-merge smoke runs, including object-storage trace archival coverage that creates several traces, runs the operator CronJob as a one-shot Job, and checks archive-object creation plus post-archive readability with `SPANS_LOCATION=ARCHIVE_REPO`
+- **`@pytest.mark.artifacts_server`**: Test direct dedicated artifact functionality and, when enabled, live Gateway rewrites
+- **`@pytest.mark.smoke`**: Fast sanity-check tests suitable for pre-merge smoke runs, including trace archival in S3 rows where both metadata stores use PostgreSQL; that coverage creates several traces, runs the operator CronJob as a one-shot Job, and checks archive-object creation plus post-archive readability with `SPANS_LOCATION=ARCHIVE_REPO`. S3 rows involving SQLite skip this case because the harness provisions their shared PVC as `ReadWriteOnce`.
 - **`@pytest.mark.pre_upgrade`**: Seed static MLflow state for upgrade validation
 - **`@pytest.mark.post_upgrade`**: Validate static MLflow state after an upgrade
 

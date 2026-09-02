@@ -97,9 +97,17 @@ Operator / OpenShift:
                           (default: auto-detect OpenShift via route.openshift.io, else base)
   FORCE_PORT_FORWARD      true|false — always port-forward the MLflow service to localhost,
                           even on OpenShift (default: false)
+  ARTIFACTS_SERVER        true|false — enable and test the dedicated metadata-aware artifact
+                          server (default: false). Requires the HTTPRoute API, PostgreSQL
+                          backend/registry stores, and file, s3, or externals3 artifacts.
+                          Normal runs may exercise multiple artifact backends. Generic Kubernetes
+                          accesses the artifact Service through localhost:8444.
+  ARTIFACTS_SERVER_GATEWAY true|false — validate live Gateway route acceptance and rewrites
+                          (default: false). Requires ARTIFACTS_SERVER=true and OpenShift.
 
 Skip / control flags:
-  SKIP_DEPLOYMENT       true|false — skip all cluster deployment (default: false)
+  SKIP_DEPLOYMENT       true|false — skip all cluster deployment (default: false).
+                        Requires exactly one backend matching the reused MLflow CR.
   SKIP_OPERATOR         true|false — skip operator deployment only (default: false)
   SKIP_INFRASTRUCTURE   true|false — skip PostgreSQL/SeaweedFS deployment (default: false)
   SKIP_CLEANUP          true|false — leave resources in place after the run (default: false).
@@ -121,8 +129,8 @@ Other:
   MLFLOW_SA_NAME        Service account name created by the operator (default: mlflow-sa)
   TRACE_ARCHIVAL_RETENTION
                         Retention configured on spec.traceArchival for s3/externals3
-                        deploys (default: 1m for harness-driven runs so semantic
-                        archival smoke coverage can archive fresh test traces)
+                        deploys with PostgreSQL backend and registry stores (default:
+                        1m so semantic archival smoke coverage can archive fresh traces)
   workspaces            Comma-separated workspace namespace list (default: two random names)
   upgrade_test_workspace Static workspace namespace for upgrade pytest phases. During
                         upgrade-phase runs, the harness derives workspaces and RBAC
@@ -370,6 +378,8 @@ CLEANUP_REUSED_RESOURCES="${CLEANUP_REUSED_RESOURCES:-false}"
 FAIL_FAST="${FAIL_FAST:-true}"
 FORCE_PORT_FORWARD="${FORCE_PORT_FORWARD:-false}"
 SERVE_ARTIFACTS="${SERVE_ARTIFACTS:-${serve_artifacts:-true}}"
+ARTIFACTS_SERVER="${ARTIFACTS_SERVER:-false}"
+ARTIFACTS_SERVER_GATEWAY="${ARTIFACTS_SERVER_GATEWAY:-false}"
 OVERALL_EXIT=0
 
 ARTIFACT_BACKENDS_CONFIGURED=false
@@ -377,11 +387,17 @@ STORAGE_TYPE_CONFIGURED=false
 [ -n "${ARTIFACT_BACKENDS+x}" ] && ARTIFACT_BACKENDS_CONFIGURED=true
 [ -n "${STORAGE_TYPE+x}" ] && STORAGE_TYPE_CONFIGURED=true
 
-# Suites to run.  Each entry is an artifact storage backend (file|s3); the script
+# Suites to run. Each entry is an artifact storage backend (file|s3|externals3); the script
 # deploys a fresh MLflow CR per suite, runs the full test suite, then tears it down.
 # Backward compatibility: STORAGE_TYPE=<type> (old single-suite interface) is honoured
 # when ARTIFACT_BACKENDS is not explicitly set.
-ARTIFACT_BACKENDS="${ARTIFACT_BACKENDS:-${STORAGE_TYPE:-file,s3}}"
+if ! $ARTIFACT_BACKENDS_CONFIGURED; then
+    if $STORAGE_TYPE_CONFIGURED; then
+        ARTIFACT_BACKENDS="${STORAGE_TYPE}"
+    else
+        ARTIFACT_BACKENDS="file,s3"
+    fi
+fi
 # STORAGE_TYPE is set per-iteration by the main loop; this default is only used if
 # run_suite is somehow called outside the loop (e.g. during development/debugging).
 STORAGE_TYPE="${STORAGE_TYPE:-file}"
@@ -403,12 +419,43 @@ if [ -n "$INFERRED_UPGRADE_PHASE" ]; then
     STORAGE_TYPE="$ARTIFACT_BACKENDS"
 fi
 
+_compact_artifact_backends="$(printf '%s' "$ARTIFACT_BACKENDS" | tr -d '[:space:]')"
+case "$_compact_artifact_backends" in
+    ,*|*,|*,,*)
+        echo "ERROR: ARTIFACT_BACKENDS must not contain empty entries." >&2
+        fail_run "test_config" "ARTIFACT_BACKENDS must not contain empty entries."
+        ;;
+esac
+
 mapfile -t _resolved_backends < <(printf '%s\n' "$ARTIFACT_BACKENDS" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | sed '/^$/d')
 ARTIFACT_BACKEND_COUNT="${#_resolved_backends[@]}"
+
+if [ "$ARTIFACT_BACKEND_COUNT" -eq 0 ]; then
+    echo "ERROR: ARTIFACT_BACKENDS must contain at least one of: file, s3, externals3." >&2
+    fail_run "test_config" "ARTIFACT_BACKENDS must contain at least one of: file, s3, externals3."
+fi
+for artifact_backend in "${_resolved_backends[@]}"; do
+    case "$artifact_backend" in
+        file|s3|externals3) ;;
+        *)
+            echo "ERROR: Unsupported ARTIFACT_BACKENDS value: '${artifact_backend}'. Supported: file, s3, externals3." >&2
+            fail_run "test_config" "Unsupported ARTIFACT_BACKENDS value: '${artifact_backend}'. Supported: file, s3, externals3."
+            ;;
+    esac
+    if [ "$artifact_backend" = "externals3" ] && \
+       { [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ] || [ -z "${BUCKET:-}" ]; }; then
+        echo "ERROR: externals3 requires AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and BUCKET." >&2
+        fail_run "test_config" "externals3 requires AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and BUCKET."
+    fi
+done
 
 if [ "$SKIP_CLEANUP" = "true" ] && [ "$ARTIFACT_BACKEND_COUNT" -ne 1 ]; then
     echo "ERROR: SKIP_CLEANUP=true requires exactly one backend via ARTIFACT_BACKENDS or STORAGE_TYPE." >&2
     fail_run "test_config" "SKIP_CLEANUP=true requires exactly one backend via ARTIFACT_BACKENDS or STORAGE_TYPE."
+fi
+if [ "$SKIP_DEPLOYMENT" = "true" ] && [ "$ARTIFACT_BACKEND_COUNT" -ne 1 ]; then
+    echo "ERROR: SKIP_DEPLOYMENT=true requires exactly one backend matching the reused MLflow deployment." >&2
+    fail_run "test_config" "SKIP_DEPLOYMENT=true requires exactly one backend matching the reused MLflow deployment."
 fi
 
 case "$CLEANUP_REUSED_RESOURCES" in
@@ -430,6 +477,35 @@ if [ -z "${INFRASTRUCTURE_PLATFORM:-}" ]; then
     fi
 fi
 
+if [ "$ARTIFACTS_SERVER" = "true" ]; then
+    if [ "$ARTIFACTS_SERVER_GATEWAY" = "true" ] && [ "$INFRASTRUCTURE_PLATFORM" != "openshift" ]; then
+        echo "ERROR: ARTIFACTS_SERVER_GATEWAY=true requires a Gateway-capable OpenShift cluster." >&2
+        fail_run "test_config" "ARTIFACTS_SERVER_GATEWAY=true requires a Gateway-capable OpenShift cluster."
+    fi
+    if [ "$ARTIFACTS_SERVER_GATEWAY" = "true" ] && [ "$FORCE_PORT_FORWARD" = "true" ]; then
+        echo "ERROR: ARTIFACTS_SERVER_GATEWAY=true cannot use FORCE_PORT_FORWARD; the test must traverse the Gateway." >&2
+        fail_run "test_config" "ARTIFACTS_SERVER_GATEWAY=true cannot use FORCE_PORT_FORWARD; the test must traverse the Gateway."
+    fi
+    case "$BACKEND_STORE" in
+        postgres|postgresql) ;;
+        *)
+            echo "ERROR: ARTIFACTS_SERVER=true requires BACKEND_STORE=postgres and REGISTRY_STORE=postgres." >&2
+            fail_run "test_config" "ARTIFACTS_SERVER=true requires BACKEND_STORE=postgres and REGISTRY_STORE=postgres."
+            ;;
+    esac
+    case "$REGISTRY_STORE" in
+        postgres|postgresql) ;;
+        *)
+            echo "ERROR: ARTIFACTS_SERVER=true requires BACKEND_STORE=postgres and REGISTRY_STORE=postgres." >&2
+            fail_run "test_config" "ARTIFACTS_SERVER=true requires BACKEND_STORE=postgres and REGISTRY_STORE=postgres."
+            ;;
+    esac
+    SERVE_ARTIFACTS=false
+elif [ "$ARTIFACTS_SERVER_GATEWAY" = "true" ]; then
+    echo "ERROR: ARTIFACTS_SERVER_GATEWAY=true requires ARTIFACTS_SERVER=true." >&2
+    fail_run "test_config" "ARTIFACTS_SERVER_GATEWAY=true requires ARTIFACTS_SERVER=true."
+fi
+
 # Infrastructure image overrides
 POSTGRES_IMAGE="${POSTGRES_IMAGE:-}"
 SEAWEEDFS_IMAGE="${SEAWEEDFS_IMAGE:-}"
@@ -448,7 +524,11 @@ S3_ENDPOINT_URL="${S3_ENDPOINT_URL:-${AWS_DEFAULT_ENDPOINT:-}}"
 # Leave empty to let deploy.py use its default ("disable" for self-deployed postgres).
 DB_SSLMODE="${DB_SSLMODE:-}"
 
-RANDOM_SUFFIX=$(head /dev/urandom | tr -dc a-z0-9 | head -c 8)
+# LC_ALL=C is required: macOS tr treats /dev/urandom as UTF-8 and exits with
+# "Illegal byte sequence" under a UTF-8 locale (set -e then aborts the script).
+# Read a finite blob first so tr sees EOF instead of SIGPIPE; with pipefail,
+# `tr </dev/urandom | head` exits 141 on Linux and aborts the suite.
+RANDOM_SUFFIX=$(head -c 256 /dev/urandom | LC_ALL=C tr -dc 'a-z0-9' | head -c 8)
 WORKSPACE_LIST="${workspaces:-workspace1-${RANDOM_SUFFIX},workspace2-${RANDOM_SUFFIX}}"
 if [ -n "$INFERRED_UPGRADE_PHASE" ]; then
     WORKSPACE_LIST="$UPGRADE_TEST_WORKSPACE"
@@ -458,6 +538,7 @@ export workspaces="$WORKSPACE_LIST"
 
 PF_PID=""
 S3_PF_PID=""
+ARTIFACTS_PF_PID=""
 _CREATED_WORKSPACES=""  # tracks only namespaces created by this run (not pre-existing)
 # Set to true after the first suite so subsequent suites skip re-deploying the operator.
 _OPERATOR_DEPLOYED=false
@@ -500,8 +581,10 @@ should_use_mlflow_prefixed_health_endpoint() {
 stop_port_forwards() {
     [ -n "$PF_PID" ] && kill -0 "$PF_PID" 2>/dev/null && kill "$PF_PID"
     [ -n "$S3_PF_PID" ] && kill -0 "$S3_PF_PID" 2>/dev/null && kill "$S3_PF_PID"
+    [ -n "$ARTIFACTS_PF_PID" ] && kill -0 "$ARTIFACTS_PF_PID" 2>/dev/null && kill "$ARTIFACTS_PF_PID"
     PF_PID=""
     S3_PF_PID=""
+    ARTIFACTS_PF_PID=""
 }
 
 cleanup_self_managed_infrastructure() {
@@ -627,6 +710,59 @@ wait_for_mlflow_server_info() {
         fi
         sleep 5
     done
+}
+
+wait_for_artifacts_server_route() {
+    echo "  Waiting for the dedicated artifact Deployment..."
+    if ! kubectl wait --for=condition=Available deployment/mlflow-artifacts \
+        --namespace "$NAMESPACE" --timeout=300s; then
+        echo "ERROR: mlflow-artifacts Deployment did not become available" >&2
+        collect_debug_logs "artifact deployment readiness failure"
+        fail_suite "test_wait_for_artifacts_server_route" \
+            "mlflow-artifacts Deployment did not become available"
+        return 1
+    fi
+
+    if [ "$ARTIFACTS_SERVER_GATEWAY" != "true" ]; then
+        return 0
+    fi
+
+    echo "  Waiting for the dedicated artifact Gateway route..."
+
+    local retry=0
+    local max_retries=60
+    local route_conditions=""
+    until route_conditions=$(kubectl get httproute mlflow-artifacts -n "$NAMESPACE" \
+        -o jsonpath='{range .status.parents[*].conditions[*]}{.type}={.status}{"\n"}{end}' 2>/dev/null) && \
+        grep -qx "Accepted=True" <<<"$route_conditions" && \
+        grep -qx "ResolvedRefs=True" <<<"$route_conditions"; do
+        retry=$((retry + 1))
+        if [ "$retry" -ge "$max_retries" ]; then
+            echo "ERROR: mlflow-artifacts HTTPRoute was not accepted within timeout" >&2
+            collect_debug_logs "artifact route acceptance failure"
+            fail_suite "test_wait_for_artifacts_server_route" \
+                "mlflow-artifacts HTTPRoute was not accepted within timeout"
+            return 1
+        fi
+        sleep 5
+    done
+
+    local artifacts_url=""
+    retry=0
+    max_retries=12
+    until artifacts_url=$(kubectl get mlflow "$MLFLOW_NAME" -n "$NAMESPACE" -o jsonpath='{.status.artifactsUrl}' 2>/dev/null) && \
+        [ -n "$artifacts_url" ]; do
+        retry=$((retry + 1))
+        if [ "$retry" -ge "$max_retries" ]; then
+            echo "ERROR: MLflow CR status.artifactsUrl is empty with ARTIFACTS_SERVER=true" >&2
+            collect_debug_logs "artifact route URL failure"
+            fail_suite "test_wait_for_artifacts_server_route" \
+                "MLflow CR status.artifactsUrl is empty with ARTIFACTS_SERVER=true"
+            return 1
+        fi
+        sleep 5
+    done
+    echo "  Artifact route accepted; status.artifactsUrl=$artifacts_url"
 }
 
 should_cleanup_reused_resources() {
@@ -799,6 +935,12 @@ run_suite() {
             --platform              "$INFRASTRUCTURE_PLATFORM"
             --serve-artifacts       "$SERVE_ARTIFACTS"
         )
+        [ "$ARTIFACTS_SERVER" = "true" ] && deploy_args+=(--artifacts-server)
+        if [ "$ARTIFACTS_SERVER" = "true" ] && \
+           [ "$ARTIFACTS_SERVER_GATEWAY" != "true" ] && \
+           [ "$INFRASTRUCTURE_PLATFORM" != "openshift" ]; then
+            deploy_args+=(--mlflow-url "https://localhost:8444")
+        fi
         [ -n "${MLFLOW_RESOLVED_IMAGE}" ] && deploy_args+=(--mlflow-image "$MLFLOW_RESOLVED_IMAGE")
 
         [ -n "${POSTGRES_IMAGE:-}"  ] && deploy_args+=(--postgres-image  "$POSTGRES_IMAGE")
@@ -979,6 +1121,23 @@ run_suite() {
     if ! wait_for_mlflow_server_info; then
         return 1
     fi
+    if [ "$ARTIFACTS_SERVER" = "true" ] && ! wait_for_artifacts_server_route; then
+        return 1
+    fi
+    if [ "$ARTIFACTS_SERVER" = "true" ]; then
+        if [ "$ARTIFACTS_SERVER_GATEWAY" = "true" ]; then
+            local published_artifacts_url
+            published_artifacts_url="$(kubectl get mlflow "$MLFLOW_NAME" -n "$NAMESPACE" -o jsonpath='{.status.artifactsUrl}')"
+            export MLFLOW_ARTIFACTS_URI="${published_artifacts_url%/api/2.0/mlflow-artifacts/artifacts}"
+        else
+            echo "  Port-forwarding dedicated artifact service to localhost:8444..."
+            kubectl port-forward "svc/mlflow-artifacts" -n "$NAMESPACE" 8444:8443 &
+            ARTIFACTS_PF_PID=$!
+            sleep 2
+            export MLFLOW_ARTIFACTS_URI="https://localhost:8444/mlflow-artifacts"
+        fi
+        echo "  MLFLOW_ARTIFACTS_URI=$MLFLOW_ARTIFACTS_URI"
+    fi
 
     if [ "$INFERRED_UPGRADE_PHASE" = "post_upgrade" ]; then
         echo "  Waiting for MLflow CR status.version to reach ${SUPPORTED_MLFLOW_VERSION_RAW}..."
@@ -1036,7 +1195,17 @@ run_suite() {
     # Config.SERVE_ARTIFACTS stays in sync if the default ever changes.
     export serve_artifacts="${SERVE_ARTIFACTS}"
     export TRACE_ARCHIVAL_RETENTION
+    export artifacts_server="${ARTIFACTS_SERVER}"
+    export artifacts_server_gateway="${ARTIFACTS_SERVER_GATEWAY}"
+    export mlflow_namespace="${NAMESPACE}"
     export AWS_S3_BUCKET="${AWS_S3_BUCKET:-${BUCKET:-}}"
+    local deployed_trace_archival
+    if ! deployed_trace_archival="$(kubectl get mlflow "$MLFLOW_NAME" -o jsonpath='{.spec.traceArchival.enabled}')"; then
+        echo "ERROR: Failed to read trace archival state from MLflow CR ${MLFLOW_NAME}" >&2
+        fail_suite "test_read_trace_archival_state" "Failed to read trace archival state from MLflow CR ${MLFLOW_NAME}"
+        return 1
+    fi
+    export trace_archival_enabled="${deployed_trace_archival:-false}"
 
     local results_file="${TEST_RESULTS_DIR}/xunit_report_${STORAGE_TYPE}.xml"
     echo "  Running tests (output: $results_file)..."
