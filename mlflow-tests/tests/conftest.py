@@ -6,13 +6,14 @@ from pathlib import Path
 
 import pytest
 import random
+import urllib3
 
 from mlflow_tests.enums import ResourceType, KubeVerb
 from mlflow_tests.manager.namespace import K8Manager
 from mlflow_tests.manager.user import K8UserManager
 from mlflow_tests.utils.client import ClientManager
 from .constants.config import Config
-from .http_utils import configure_ca_bundle_environment
+from .http_utils import configure_ca_bundle_environment, get_requests_verify_value
 from .upgrade.utils import (
     UPGRADE_PHASES,
     clear_missing_post_upgrade_dataset,
@@ -148,11 +149,9 @@ def setup_clients():
     logger.info("STARTING TEST SESSION SETUP")
     logger.info("=" * 80)
 
-    # Disable SSL verification for testing environments
-    # WARNING: This is insecure and should only be used in development/testing
-    import urllib3
-    logger.warning("Disabling SSL verification for testing environment - THIS IS INSECURE")
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    if get_requests_verify_value() is False:
+        logger.warning("Disabling SSL verification for testing environment - THIS IS INSECURE")
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     # Configure TLS for tracking and artifact-storage clients.
     os.environ['MLFLOW_TRACKING_INSECURE_TLS'] = Config.DISABLE_TLS
