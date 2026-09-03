@@ -1,5 +1,6 @@
 import logging
 import os
+import socket
 import time
 from typing import ClassVar
 
@@ -261,6 +262,43 @@ class TestMLflowArtifacts(TestBase):
         self._execute_test_steps(test_data)
 
         logger.info(f"Test PASSED: {test_data.test_name}")
+
+    @pytest.mark.skipif(
+        Config.ARTIFACT_STORAGE != "s3",
+        reason="requires the in-cluster SeaweedFS S3 backend",
+    )
+    def test_s3_model_download_uses_runner_reachable_presigned_endpoint(
+        self, create_user_with_permissions
+    ) -> None:
+        """Load a model through the multipart download path from the test container.
+
+        The server signs URLs using the cluster Service DNS name.  The integration
+        launcher maps that name to its SeaweedFS localhost port-forward, while the
+        MLflow pod continues to resolve it through Kubernetes DNS.
+        """
+        signed_url_host = f"minio-service.{Config.MLFLOW_NAMESPACE}.svc.cluster.local"
+        assert socket.gethostbyname(signed_url_host) == "127.0.0.1"
+
+        workspace = Config.WORKSPACES[0]
+        user = create_user_with_permissions(
+            workspace=workspace,
+            verbs=[KubeVerb.GET, KubeVerb.UPDATE],
+            resource_types=[ResourceType.EXPERIMENTS],
+        )
+        self.test_context.active_user = user
+        self.test_context.user_client = user.client
+        self.test_context.active_workspace = workspace
+        mlflow.set_workspace(workspace)
+        self._set_active_experiment_from_map(workspace)
+
+        action_start_run(self.test_context)
+        try:
+            action_create_model(self.test_context)
+            action_log_model(self.test_context)
+            action_load_model(self.test_context)
+            assert self.test_context.model.predict([[3]])[0] == pytest.approx(7)
+        finally:
+            action_end_run(self.test_context)
 
 
 @pytest.mark.artifacts_server
