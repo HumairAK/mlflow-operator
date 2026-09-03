@@ -1,5 +1,7 @@
 """Shared HTTP helpers for integration-style test requests."""
 
+import os
+
 from tests.constants.config import Config
 
 
@@ -15,3 +17,18 @@ def get_requests_verify_value() -> bool | str:
     if Config.CA_BUNDLE:
         return Config.CA_BUNDLE
     return True
+
+
+def configure_ca_bundle_environment() -> None:
+    if Config.CA_BUNDLE:
+        for name in (
+            "SSL_CERT_FILE",
+            "REQUESTS_CA_BUNDLE",
+            "CURL_CA_BUNDLE",
+            "AWS_CA_BUNDLE",
+        ):
+            os.environ[name] = Config.CA_BUNDLE
+    else:
+        # Empty bundle variables are invalid for requests and botocore.
+        os.environ.pop("REQUESTS_CA_BUNDLE", None)
+        os.environ.pop("CURL_CA_BUNDLE", None)

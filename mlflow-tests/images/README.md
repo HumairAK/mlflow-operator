@@ -121,8 +121,11 @@ For the self-deployed `s3` backend, the MLflow pod uses the Kubernetes
 `minio-service.<namespace>.svc.cluster.local:9000` endpoint. The integration
 launcher preserves that endpoint in generated presigned URLs and maps that
 hostname to the runner's localhost SeaweedFS port-forward in the
-host-networked test container. This lets multipart downloads reach SeaweedFS
-without changing the in-cluster endpoint used by MLflow.
+host-networked test container. When SeaweedFS TLS is enabled, the harness also
+extracts all `.crt` and `.pem` entries from the configured CA ConfigMap and
+configures the test clients to trust them. This lets multipart downloads reach
+SeaweedFS without changing the in-cluster endpoint used by MLflow or disabling
+certificate verification.
 
 ### Infrastructure image overrides
 

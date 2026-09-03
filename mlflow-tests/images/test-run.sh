@@ -539,6 +539,10 @@ export workspaces="$WORKSPACE_LIST"
 PF_PID=""
 S3_PF_PID=""
 ARTIFACTS_PF_PID=""
+TEST_CA_BUNDLE_FILE=""
+declare -A _TEST_CA_ENV_VALUES=()
+declare -A _TEST_CA_ENV_WAS_SET=()
+_TEST_CA_ENV_CAPTURED=false
 _CREATED_WORKSPACES=""  # tracks only namespaces created by this run (not pre-existing)
 # Set to true after the first suite so subsequent suites skip re-deploying the operator.
 _OPERATOR_DEPLOYED=false
@@ -651,6 +655,88 @@ collect_debug_logs() {
         --output-dir "${TEST_RESULTS_DIR}/debug"; then
         echo "WARN: debug log collection failed for namespace '${NAMESPACE}' after ${failure_reason}" >&2
     fi
+}
+
+restore_test_ca_bundle_environment() {
+    [ -n "$TEST_CA_BUNDLE_FILE" ] && rm -f "$TEST_CA_BUNDLE_FILE"
+    TEST_CA_BUNDLE_FILE=""
+
+    if [ "$_TEST_CA_ENV_CAPTURED" != "true" ]; then
+        return
+    fi
+
+    local name
+    for name in ca_bundle SSL_CERT_FILE REQUESTS_CA_BUNDLE CURL_CA_BUNDLE AWS_CA_BUNDLE; do
+        if [ "${_TEST_CA_ENV_WAS_SET[$name]:-false}" = "true" ]; then
+            printf -v "$name" '%s' "${_TEST_CA_ENV_VALUES[$name]}"
+            export "$name"
+        else
+            unset "$name"
+        fi
+    done
+    _TEST_CA_ENV_VALUES=()
+    _TEST_CA_ENV_WAS_SET=()
+    _TEST_CA_ENV_CAPTURED=false
+}
+
+configure_test_ca_bundle() {
+    restore_test_ca_bundle_environment
+    if [ "$STORAGE_TYPE" != "s3" ] || [ "$SEAWEEDFS_TLS" != "true" ]; then
+        return 0
+    fi
+
+    local name
+    for name in ca_bundle SSL_CERT_FILE REQUESTS_CA_BUNDLE CURL_CA_BUNDLE AWS_CA_BUNDLE; do
+        if [[ -v "$name" ]]; then
+            _TEST_CA_ENV_VALUES[$name]="${!name}"
+            _TEST_CA_ENV_WAS_SET[$name]=true
+        fi
+    done
+    _TEST_CA_ENV_CAPTURED=true
+
+    local configmap_name="${CA_BUNDLE_CONFIGMAP:-mlflow-ca-bundle}"
+    local custom_ca_file
+    custom_ca_file="$(mktemp)"
+    TEST_CA_BUNDLE_FILE="$(mktemp)"
+
+    if ! kubectl get configmap "$configmap_name" --namespace "$NAMESPACE" -o json \
+        | uv run --project "$UV_PROJECT_DIR" --no-sync python -c '
+import json
+import sys
+
+data = json.load(sys.stdin).get("data", {})
+certificates = [data[key] for key in sorted(data) if key.endswith((".crt", ".pem"))]
+if not certificates:
+    raise SystemExit("ConfigMap has no .crt or .pem entries")
+sys.stdout.write("\n".join(certificates))
+' > "$custom_ca_file"; then
+        echo "ERROR: Failed to read .crt or .pem certificates from ConfigMap ${configmap_name}" >&2
+        rm -f "$custom_ca_file"
+        restore_test_ca_bundle_environment
+        return 1
+    fi
+    if ! grep -q "BEGIN CERTIFICATE" "$custom_ca_file"; then
+        echo "ERROR: ConfigMap ${configmap_name} does not contain a valid CA certificate" >&2
+        rm -f "$custom_ca_file"
+        restore_test_ca_bundle_environment
+        return 1
+    fi
+
+    local system_ca_bundle="/etc/pki/tls/certs/ca-bundle.crt"
+    if [ -f "$system_ca_bundle" ]; then
+        cat "$system_ca_bundle" "$custom_ca_file" > "$TEST_CA_BUNDLE_FILE"
+    else
+        mv "$custom_ca_file" "$TEST_CA_BUNDLE_FILE"
+        custom_ca_file=""
+    fi
+    [ -n "$custom_ca_file" ] && rm -f "$custom_ca_file"
+
+    export ca_bundle="$TEST_CA_BUNDLE_FILE"
+    export SSL_CERT_FILE="$TEST_CA_BUNDLE_FILE"
+    export REQUESTS_CA_BUNDLE="$TEST_CA_BUNDLE_FILE"
+    export CURL_CA_BUNDLE="$TEST_CA_BUNDLE_FILE"
+    export AWS_CA_BUNDLE="$TEST_CA_BUNDLE_FILE"
+    echo "  Configured test clients to trust ${configmap_name}"
 }
 
 wait_for_mlflow_cr_available() {
@@ -788,6 +874,11 @@ should_cleanup_reused_resources() {
 # The DataScienceCluster mlflowoperator component is assumed to remain Managed.
 
 cleanup() {
+    restore_test_ca_bundle_environment
+    if [ "$SKIP_CLEANUP" = "true" ]; then
+        return
+    fi
+
     stop_port_forwards
 
     local should_cleanup_mlflow=false
@@ -828,9 +919,7 @@ cleanup() {
     fi
 }
 
-if [ "$SKIP_CLEANUP" != "true" ]; then
-    trap cleanup EXIT
-fi
+trap cleanup EXIT
 
 # ─── CSV patching (OpenShift/OLM) ─────────────────────────────────────────────
 # Done once before the suite loop — the MLflow operator manifests don't change
@@ -1185,6 +1274,11 @@ run_suite() {
         # same resolved endpoint so object verification does not fall back to AWS.
         export MLFLOW_S3_ENDPOINT_URL="${MLFLOW_S3_ENDPOINT_URL:-${S3_ENDPOINT_URL}}"
     fi
+    if ! configure_test_ca_bundle; then
+        fail_suite "test_configure_ca_bundle" \
+            "Failed to configure test clients with the SeaweedFS CA bundle"
+        return 1
+    fi
 
     # ── Tests ───────────────────────────────────────────────────────────────────
     # Export artifact_storage and serve_artifacts so Config reads in the test suite
@@ -1206,6 +1300,7 @@ run_suite() {
     if ! deployed_trace_archival="$(kubectl get mlflow "$MLFLOW_NAME" -o jsonpath='{.spec.traceArchival.enabled}')"; then
         echo "ERROR: Failed to read trace archival state from MLflow CR ${MLFLOW_NAME}" >&2
         fail_suite "test_read_trace_archival_state" "Failed to read trace archival state from MLflow CR ${MLFLOW_NAME}"
+        restore_test_ca_bundle_environment
         return 1
     fi
     export trace_archival_enabled="${deployed_trace_archival:-false}"
@@ -1225,6 +1320,7 @@ run_suite() {
         fi
     fi
 
+    restore_test_ca_bundle_environment
     return "$suite_exit"
 }
 
