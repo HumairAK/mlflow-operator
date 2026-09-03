@@ -117,6 +117,13 @@ The script is configured entirely via environment variables. Variables can also 
 | `DB_NAME` | `mydatabase` | PostgreSQL database name. Custom values require reused/external PostgreSQL via `SKIP_INFRASTRUCTURE=true`. |
 | `DB_SSLMODE` | _(unset)_ | SSL mode for the PostgreSQL connection URI. |
 
+For the self-deployed `s3` backend, the MLflow pod uses the Kubernetes
+`minio-service.<namespace>.svc.cluster.local:9000` endpoint. The integration
+launcher preserves that endpoint in generated presigned URLs and maps that
+hostname to the runner's localhost SeaweedFS port-forward in the
+host-networked test container. This lets multipart downloads reach SeaweedFS
+without changing the in-cluster endpoint used by MLflow.
+
 ### Infrastructure image overrides
 
 | Variable | Default | Description |

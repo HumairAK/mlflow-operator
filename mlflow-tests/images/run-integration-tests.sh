@@ -47,8 +47,18 @@ if [ -n "${PYTEST_MARK_EXPRESSION:-}" ]; then
   pytest_marker_args=(-m "$PYTEST_MARK_EXPRESSION")
 fi
 
+docker_args=(--rm --network host)
+# MLflow signs SeaweedFS URLs with its in-cluster service endpoint. test-run.sh
+# port-forwards that service to the runner, so make the exact signed-URL host
+# resolve to the runner loopback from this host-networked test container.
+if [[ ",${ARTIFACT_BACKENDS}," == *,s3,* ]]; then
+  docker_args+=(
+    --add-host "minio-service.${NAMESPACE}.svc.cluster.local:127.0.0.1"
+  )
+fi
+
 set +e
-docker run --rm --network host \
+docker run "${docker_args[@]}" \
   -v "$HOME/.kube:/mlflow/.kube:ro,z" \
   -v "$(cd "$results_dir" && pwd):/mlflow/results:z" \
   -e DEPLOY_MLFLOW_OPERATOR=false \
