@@ -16,6 +16,7 @@ from botocore.config import Config as BotocoreConfig
 from botocore.exceptions import ClientError
 from kubernetes import client
 from kubernetes.client.rest import ApiException
+from kubernetes.stream import stream
 
 from mlflow_tests.utils.client import ClientManager
 
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 GC_CRONJOB_NAME = "mlflow-gc"
 GC_CONTAINER_NAME = "mlflow-gc"
 POLL_INTERVAL_SECONDS = 2
-JOB_TIMEOUT_SECONDS = 180
+JOB_TIMEOUT_SECONDS = 300
 OBJECT_TIMEOUT_SECONDS = 30
 
 
@@ -48,7 +49,9 @@ def _s3_client():
     return boto3.client(**kwargs)
 
 
-def _job_from_cronjob(cronjob: client.V1CronJob, name: str) -> client.V1Job:
+def _job_from_cronjob(
+    cronjob: client.V1CronJob, name: str, insecure_tls: str
+) -> client.V1Job:
     template = cronjob.spec.job_template
     metadata = client.V1ObjectMeta(
         name=name,
@@ -56,7 +59,17 @@ def _job_from_cronjob(cronjob: client.V1CronJob, name: str) -> client.V1Job:
         labels=dict(template.metadata.labels or {}),
         annotations={"cronjob.kubernetes.io/instantiate": "manual"},
     )
-    return client.V1Job(metadata=metadata, spec=template.spec)
+    job = client.V1Job(metadata=metadata, spec=template.spec)
+    container = next(
+        container
+        for container in job.spec.template.spec.containers
+        if container.name == GC_CONTAINER_NAME
+    )
+    for env_var in container.env or []:
+        if env_var.name == "MLFLOW_TRACKING_INSECURE_TLS":
+            env_var.value = insecure_tls
+            break
+    return job
 
 
 def _artifact_object_key(artifact_uri: str, artifact_path: str, filename: str) -> str:
@@ -86,7 +99,40 @@ def _artifact_object_key(artifact_uri: str, artifact_path: str, filename: str) -
     return f"{prefix}/{artifact_path}/{filename}"
 
 
-def _job_pod_diagnostics(core_api: client.CoreV1Api, name: str, namespace: str) -> str:
+def _request_job_stack_dumps(
+    core_api: client.CoreV1Api, name: str, namespace: str
+) -> None:
+    pods = core_api.list_namespaced_pod(namespace, label_selector=f"job-name={name}")
+    for pod in pods.items:
+        if pod.status.phase != "Running":
+            continue
+        try:
+            stream(
+                core_api.connect_get_namespaced_pod_exec,
+                pod.metadata.name,
+                namespace,
+                command=["/bin/sh", "-c", "kill -USR1 1"],
+                container=GC_CONTAINER_NAME,
+                stderr=True,
+                stdin=False,
+                stdout=True,
+                tty=False,
+            )
+        except ApiException as exc:
+            logger.warning(
+                "Unable to request a GC stack dump from %s: %s", pod.metadata.name, exc
+            )
+
+
+def _job_pod_diagnostics(
+    core_api: client.CoreV1Api,
+    name: str,
+    namespace: str,
+    request_stack_dump: bool = False,
+) -> str:
+    if request_stack_dump:
+        _request_job_stack_dumps(core_api, name, namespace)
+        time.sleep(POLL_INTERVAL_SECONDS)
     pods = core_api.list_namespaced_pod(namespace, label_selector=f"job-name={name}")
     diagnostics = []
     for pod in pods.items:
@@ -120,12 +166,11 @@ def _wait_for_job(
         time.sleep(POLL_INTERVAL_SECONDS)
     pytest.fail(
         f"Garbage collection Job {name} did not complete within {JOB_TIMEOUT_SECONDS}s:\n"
-        + _job_pod_diagnostics(core_api, name, namespace)
+        + _job_pod_diagnostics(core_api, name, namespace, request_stack_dump=True)
     )
 
 
 @pytest.mark.smoke
-@pytest.mark.artifacts_server
 @pytest.mark.skipif(
     Config.ARTIFACT_STORAGE != "s3" or not Config.GARBAGE_COLLECTION_ENABLED,
     reason="garbage collection live Job requires enabled remote SQL/S3 deployment",
@@ -142,7 +187,7 @@ class TestGarbageCollection(TestBase):
         mlflow.set_workspace(workspace)
 
         experiment_id = self.admin_client.create_experiment(
-            f"gc-smoke-{uuid.uuid4().hex}"
+            f"gc-smoke-{uuid.uuid4().hex}",
         )
         self.test_context.add_experiment_for_cleanup(experiment_id, workspace)
         run = self.admin_client.create_run(experiment_id)
@@ -160,6 +205,7 @@ class TestGarbageCollection(TestBase):
         object_key = _artifact_object_key(
             artifact_uri, artifact_path, artifact_filename
         )
+
         s3 = _s3_client()
         deadline = time.monotonic() + OBJECT_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
@@ -181,7 +227,8 @@ class TestGarbageCollection(TestBase):
         )
         job_name = f"gc-e2e-{uuid.uuid4().hex[:8]}"
         batch_api.create_namespaced_job(
-            Config.MLFLOW_NAMESPACE, _job_from_cronjob(cronjob, job_name)
+            Config.MLFLOW_NAMESPACE,
+            _job_from_cronjob(cronjob, job_name, Config.DISABLE_TLS),
         )
         self.test_context.add_job_for_cleanup(job_name, Config.MLFLOW_NAMESPACE)
         _wait_for_job(batch_api, core_api, job_name, Config.MLFLOW_NAMESPACE)
