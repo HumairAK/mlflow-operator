@@ -77,7 +77,7 @@ func TestMLflowOperatorReconcileManagesMetricsServiceMonitor(t *testing.T) {
 		t.Fatalf("ServiceMonitor should not retain a kustomize managed-by label, got labels %#v", monitor.Labels)
 	}
 	endpoint := monitor.Spec.Endpoints[0]
-	if endpoint.Path != "/metrics" || endpoint.Port != metricsPortName || endpoint.Scheme == nil || *endpoint.Scheme != monitoringv1.SchemeHTTPS {
+	if endpoint.Path != "/metrics" || endpoint.Port != metricsPortName || endpoint.Scheme == nil || *endpoint.Scheme != monitoringv1.Scheme("https") {
 		t.Fatalf("unexpected endpoint: %#v", endpoint)
 	}
 	if endpoint.TLSConfig == nil || endpoint.TLSConfig.ServerName == nil || *endpoint.TLSConfig.ServerName != "mlflow-operator-controller-manager-metrics-service.redhat-ods-applications.svc" {
