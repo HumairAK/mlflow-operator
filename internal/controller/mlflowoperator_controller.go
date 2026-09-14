@@ -211,7 +211,7 @@ func (r *MLflowOperatorReconciler) reconcileMetricsServiceMonitor(ctx context.Co
 }
 
 func schemeHTTPS() *monitoringv1.Scheme {
-	scheme := monitoringv1.SchemeHTTPS
+	scheme := monitoringv1.Scheme("https")
 	return &scheme
 }
 
