@@ -731,7 +731,7 @@ spec:
 				dummyRemoteStoreSpec+`
   traceArchival:
     enabled: true
-    schedule: "0 0 1 1 *"
+    schedule: "0 0 29 2 *"
     location: "file:///mlflow/traces"
     retention: "30d"`,
 				"enabled file-based traceArchival.location requires storage with ReadWriteMany",
@@ -752,7 +752,7 @@ spec:
 			By("creating MLflow with garbage collection enabled on a non-firing schedule")
 			gcYAML := dummyRemoteStoreSpec + `
   garbageCollection:
-    schedule: "0 0 1 1 *"
+    schedule: "0 0 29 2 *"
     olderThan: "30d"`
 			gcFile, err := writeTempManifest("mlflow-gc-valid-", gcYAML)
 			Expect(err).NotTo(HaveOccurred(), "Failed to write garbage collection manifest")
@@ -771,7 +771,7 @@ spec:
 					"-o", "jsonpath={.spec.schedule}",
 				)
 				g.Expect(getErr).NotTo(HaveOccurred())
-				g.Expect(schedule).To(Equal("0 0 1 1 *"))
+				g.Expect(schedule).To(Equal("0 0 29 2 *"))
 				command, commandErr := kubectlOutput(
 					"get", "cronjob", gcCronJobName, "-n", namespace, "-o",
 					"jsonpath={.spec.jobTemplate.spec.template.spec.containers[0].command}",
@@ -871,7 +871,7 @@ spec:
 					archivalSpec: `
   traceArchival:
     enabled: true
-    schedule: "0 0 1 1 *"
+    schedule: "0 0 29 2 *"
     retention: "30d"`,
 					wantSubstring: "traceArchival.location is required when traceArchival.enabled is true",
 					failMsg:       "Should fail to create MLflow with trace archival enabled and no location",
@@ -881,7 +881,7 @@ spec:
 					archivalSpec: `
   traceArchival:
     enabled: true
-    schedule: "0 0 1 1 *"
+    schedule: "0 0 29 2 *"
     location: "s3://mlflow-trace-archive"`,
 					wantSubstring: "traceArchival.retention is required when traceArchival.enabled is true",
 					failMsg:       "Should fail to create MLflow with trace archival enabled and no retention",
@@ -891,7 +891,7 @@ spec:
 					archivalSpec: `
   traceArchival:
     enabled: true
-    schedule: "0 0 1 1 *"
+    schedule: "0 0 29 2 *"
     location: "s3://mlflow-trace-archive"
     retention: "30days"`,
 					wantSubstring: "spec.traceArchival.retention",
@@ -902,7 +902,7 @@ spec:
 					archivalSpec: `
   traceArchival:
     enabled: true
-    schedule: "0 0 1 1 *"
+    schedule: "0 0 29 2 *"
     location: "s3://mlflow-trace-archive"
     retention: "1s"`,
 					wantSubstring: "spec.traceArchival.retention",
@@ -949,7 +949,7 @@ data:
 			validArchivalYAML := dummyRemoteStoreSpec + `
   traceArchival:
     enabled: true
-    schedule: "0 0 1 1 *"
+    schedule: "0 0 29 2 *"
     location: "s3://mlflow-trace-archive"
     retention: "30d"
     maxTracesPerPass: 500`
@@ -986,7 +986,7 @@ data:
 					"-o", "jsonpath={.spec.schedule}",
 				)
 				g.Expect(getErr).NotTo(HaveOccurred())
-				g.Expect(schedule).To(Equal("0 0 1 1 *"))
+				g.Expect(schedule).To(Equal("0 0 29 2 *"))
 
 				policy, policyErr := kubectlOutput(
 					"get", "cronjob", archivalCronJobName, "-n", namespace,

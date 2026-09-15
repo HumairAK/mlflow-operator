@@ -898,14 +898,14 @@ class MLflowDeployer:
                 # Use a non-firing schedule; tests create live Jobs from the CronJob template.
                 mlflow_cr["spec"]["traceArchival"] = {
                     "enabled": True,
-                    "schedule": "0 0 1 1 *",
+                    "schedule": "0 0 29 2 *",
                     "location": f"s3://{self.args.s3_bucket}/trace-archive",
                     "retention": self.args.trace_archival_retention,
                     "maxTracesPerPass": 1000,
                 }
             if enable_garbage_collection:
                 # A smoke test manually instantiates this CronJob's template.
-                mlflow_cr["spec"]["garbageCollection"] = {"schedule": "0 0 1 1 *"}
+                mlflow_cr["spec"]["garbageCollection"] = {"schedule": "0 0 29 2 *"}
         else:
             # File-based artifact storage
             # File storage is served by tracking unless the dedicated server owns it.

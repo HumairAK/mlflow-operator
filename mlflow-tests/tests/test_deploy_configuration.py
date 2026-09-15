@@ -247,7 +247,7 @@ def test_generated_s3_cr_only_enables_safe_trace_archival(
     assert ("traceArchival" in mlflow_cr["spec"]) is expected
     assert ("garbageCollection" in mlflow_cr["spec"]) is expected
     if expected:
-        assert mlflow_cr["spec"]["garbageCollection"] == {"schedule": "0 0 1 1 *"}
+        assert mlflow_cr["spec"]["garbageCollection"] == {"schedule": "0 0 29 2 *"}
     if not expected:
         assert mlflow_cr["spec"]["storage"]["accessModes"] == ["ReadWriteOnce"]
     else:

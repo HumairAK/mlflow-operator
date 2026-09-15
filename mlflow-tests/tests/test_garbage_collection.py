@@ -14,6 +14,7 @@ import mlflow
 import pytest
 from botocore.config import Config as BotocoreConfig
 from botocore.exceptions import ClientError
+from mlflow.exceptions import MlflowException
 from kubernetes import client
 from kubernetes.client.rest import ApiException
 from kubernetes.stream import stream
@@ -212,7 +213,9 @@ class TestGarbageCollection(TestBase):
             try:
                 s3.head_object(Bucket=Config.S3_BUCKET, Key=object_key)
                 break
-            except ClientError:
+            except ClientError as exc:
+                if exc.response["Error"]["Code"] not in {"404", "NoSuchKey", "NotFound"}:
+                    raise
                 time.sleep(POLL_INTERVAL_SECONDS)
         else:
             pytest.fail(f"Artifact {object_key} was not written to S3 before GC")
@@ -233,10 +236,13 @@ class TestGarbageCollection(TestBase):
         self.test_context.add_job_for_cleanup(job_name, Config.MLFLOW_NAMESPACE)
         _wait_for_job(batch_api, core_api, job_name, Config.MLFLOW_NAMESPACE)
 
-        with pytest.raises(Exception):
-            self.admin_client.get_run(run_id)
-        with pytest.raises(Exception):
-            self.admin_client.get_experiment(experiment_id)
+        for getter, target in (
+            (self.admin_client.get_run, run_id),
+            (self.admin_client.get_experiment, experiment_id),
+        ):
+            with pytest.raises(MlflowException) as exc_info:
+                getter(target)
+            assert exc_info.value.error_code == "RESOURCE_DOES_NOT_EXIST"
         deadline = time.monotonic() + OBJECT_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
             try:
