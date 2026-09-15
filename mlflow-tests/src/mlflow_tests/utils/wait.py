@@ -47,7 +47,7 @@ def wait_until(
     *,
     description: str,
     timeout: float,
-    interval: float = 1,
+    interval: float = 1.0,
     until: Callable[[T], bool] = bool,
     retry_rules: RetryRules | None = None,
 ) -> Callable[[Callable[P, T]], Callable[P, T]]:
@@ -148,11 +148,11 @@ def wait_until(
     return decorate
 
 
-def retry_count(
+def retry(
     *,
     description: str,
     max_attempts: int,
-    interval: float = 1,
+    interval: float = 1.0,
     backoff: Callable[[int], float] | None = None,
     retry_rules: RetryRules | None = None,
 ) -> Callable[[Callable[P, T]], Callable[P, T]]:
@@ -219,7 +219,7 @@ def retry_count(
                     )
                     time.sleep(delay)
 
-            raise AssertionError("retry_count exhausted without returning or raising")
+            raise AssertionError("retry exhausted without returning or raising")
 
         return wrapped
 

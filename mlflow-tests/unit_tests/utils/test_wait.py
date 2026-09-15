@@ -1,6 +1,6 @@
 import pytest
 
-from mlflow_tests.utils.wait_until import WaitTimeoutError, retry_count, wait_until
+from mlflow_tests.utils.wait import WaitTimeoutError, retry, wait_until
 
 
 NON_FINITE_VALUES = [float("nan"), float("inf"), float("-inf")]
@@ -37,8 +37,8 @@ class FakeClock:
 @pytest.fixture
 def fake_clock(monkeypatch: pytest.MonkeyPatch) -> FakeClock:
     clock = FakeClock()
-    monkeypatch.setattr("mlflow_tests.utils.wait_until.time.monotonic", clock.monotonic)
-    monkeypatch.setattr("mlflow_tests.utils.wait_until.time.sleep", clock.sleep)
+    monkeypatch.setattr("mlflow_tests.utils.wait.time.monotonic", clock.monotonic)
+    monkeypatch.setattr("mlflow_tests.utils.wait.time.sleep", clock.sleep)
     return clock
 
 
@@ -61,16 +61,16 @@ def test_wait_until_rejects_non_finite_timing_values(timing_values: dict[str, fl
 @pytest.mark.parametrize(
     "value", NON_FINITE_VALUES, ids=NON_FINITE_IDS
 )
-def test_retry_count_rejects_non_finite_interval(value: float) -> None:
+def test_retry_rejects_non_finite_interval(value: float) -> None:
     with pytest.raises(ValueError, match="finite and non-negative"):
-        retry_count(description="service connection", max_attempts=2, interval=value)
+        retry(description="service connection", max_attempts=2, interval=value)
 
 
 @pytest.mark.parametrize(
     "value", NON_FINITE_VALUES, ids=NON_FINITE_IDS
 )
-def test_retry_count_rejects_non_finite_backoff(value: float) -> None:
-    @retry_count(
+def test_retry_rejects_non_finite_backoff(value: float) -> None:
+    @retry(
         description="service connection",
         max_attempts=2,
         backoff=lambda _attempt: value,
@@ -108,11 +108,11 @@ def test_wait_until_rejects_negative_timing_values(
         ),
     ],
 )
-def test_retry_count_rejects_invalid_configuration(
+def test_retry_rejects_invalid_configuration(
     kwargs: dict[str, int], message: str
 ) -> None:
     with pytest.raises(ValueError, match=message):
-        retry_count(description="service connection", **kwargs)
+        retry(description="service connection", **kwargs)
 
 
 @pytest.mark.parametrize(
@@ -126,13 +126,13 @@ def test_retry_rules_must_map_exception_types_to_predicates_or_none(
     retry_rules: dict[object, object], message: str
 ) -> None:
     with pytest.raises(TypeError, match=f"retry_rules {message}"):
-        retry_count(description="service connection", max_attempts=1, retry_rules=retry_rules)
+        retry(description="service connection", max_attempts=1, retry_rules=retry_rules)
     with pytest.raises(TypeError, match=f"retry_rules {message}"):
         wait_until(description="application readiness", timeout=1, retry_rules=retry_rules)
 
 
-def test_retry_count_rejects_negative_backoff() -> None:
-    @retry_count(
+def test_retry_rejects_negative_backoff() -> None:
+    @retry(
         description="service connection",
         max_attempts=2,
         backoff=lambda _attempt: -1,
@@ -279,10 +279,10 @@ def test_wait_until_does_not_retry_predicate_errors() -> None:
     assert attempts == 1
 
 
-def test_retry_count_logs_the_exception_that_caused_a_retry(caplog: pytest.LogCaptureFixture) -> None:
+def test_retry_logs_the_exception_that_caused_a_retry(caplog: pytest.LogCaptureFixture) -> None:
     attempts = 0
 
-    @retry_count(
+    @retry(
         description="service connection",
         max_attempts=3,
         interval=0,
@@ -300,11 +300,11 @@ def test_retry_count_logs_the_exception_that_caused_a_retry(caplog: pytest.LogCa
     assert "service connection failed with ConnectionError: connection refused" in caplog.text
 
 
-def test_retry_count_raises_the_final_retryable_exception() -> None:
+def test_retry_raises_the_final_retryable_exception() -> None:
     error = ConnectionError("connection refused")
     attempts = 0
 
-    @retry_count(
+    @retry(
         description="service connection",
         max_attempts=2,
         interval=0,
@@ -322,13 +322,13 @@ def test_retry_count_raises_the_final_retryable_exception() -> None:
     assert error_info.value is error
 
 
-def test_retry_count_passes_failed_attempts_to_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_retry_passes_failed_attempts_to_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
     backoff_attempts = []
     sleep_delays = []
     attempts = 0
-    monkeypatch.setattr("mlflow_tests.utils.wait_until.time.sleep", sleep_delays.append)
+    monkeypatch.setattr("mlflow_tests.utils.wait.time.sleep", sleep_delays.append)
 
-    @retry_count(
+    @retry(
         description="service connection",
         max_attempts=3,
         backoff=lambda attempt: backoff_attempts.append(attempt) or attempt,
@@ -346,12 +346,12 @@ def test_retry_count_passes_failed_attempts_to_backoff(monkeypatch: pytest.Monke
     assert sleep_delays == [1, 2]
 
 
-def test_retry_count_retries_connection_error_then_exits_on_unlisted_exception(
+def test_retry_retries_connection_error_then_exits_on_unlisted_exception(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     attempts = 0
 
-    @retry_count(
+    @retry(
         description="service connection",
         max_attempts=3,
         interval=0,
@@ -370,10 +370,10 @@ def test_retry_count_retries_connection_error_then_exits_on_unlisted_exception(
     assert "service connection failed with ConnectionError: connection refused" in caplog.text
 
 
-def test_retry_count_retries_5xx_then_exits_on_4xx(caplog: pytest.LogCaptureFixture) -> None:
+def test_retry_retries_5xx_then_exits_on_4xx(caplog: pytest.LogCaptureFixture) -> None:
     attempts = 0
 
-    @retry_count(
+    @retry(
         description="MLflow API request",
         max_attempts=3,
         interval=0,
@@ -392,7 +392,7 @@ def test_retry_count_retries_5xx_then_exits_on_4xx(caplog: pytest.LogCaptureFixt
     assert "MLflow API request failed with HttpError: HTTP 503" in caplog.text
 
 
-def test_retry_count_applies_the_rule_for_each_exception_type() -> None:
+def test_retry_applies_the_rule_for_each_exception_type() -> None:
     attempts = 0
 
     def is_connection_refused(error: Exception) -> bool:
@@ -401,7 +401,7 @@ def test_retry_count_applies_the_rule_for_each_exception_type() -> None:
     def is_server_error(error: Exception) -> bool:
         return isinstance(error, HttpError) and error.status_code >= 500
 
-    @retry_count(
+    @retry(
         description="MLflow API request",
         max_attempts=4,
         interval=0,
@@ -444,7 +444,7 @@ def test_retry_rules_use_the_first_matching_exception_type(
 ) -> None:
     attempts = 0
 
-    @retry_count(
+    @retry(
         description="service connection",
         max_attempts=2,
         interval=0,

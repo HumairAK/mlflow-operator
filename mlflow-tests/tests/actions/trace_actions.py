@@ -20,7 +20,7 @@ from mlflow.protos import databricks_pb2
 from mlflow.protos.service_pb2 import StartTraceV3
 from mlflow.utils.proto_json_utils import message_to_json
 from mlflow.utils.workspace_utils import WORKSPACE_HEADER_NAME
-from mlflow_tests.utils.wait_until import retry_count
+from mlflow_tests.utils.wait import retry
 
 from tests.constants.config import Config
 from tests.http_utils import get_mlflow_base_uri, get_requests_verify_value
@@ -135,7 +135,7 @@ def action_post_trace_v3_direct(test_context: TestContext) -> None:
     }
     trace_endpoint = f"{get_mlflow_base_uri()}/api/3.0/mlflow/traces"
 
-    @retry_count(
+    @retry(
         description="Trace POST connection",
         max_attempts=_TRACE_POST_MAX_ATTEMPTS,
         backoff=lambda attempt: _TRACE_POST_RETRY_DELAY_SECONDS * attempt,
