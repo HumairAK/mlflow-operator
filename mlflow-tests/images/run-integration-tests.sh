@@ -78,6 +78,16 @@ if [[ ",${ARTIFACT_BACKENDS}," == *,s3,* ]]; then
     --add-host "minio-service.${NAMESPACE}.svc.cluster.local:127.0.0.1"
   )
 fi
+# The split S3 GC row persists the artifact Service DNS name so the GC Job can
+# use it in-cluster. Map that same name to the host-side port-forward for the
+# host-networked external test container.
+if [ "${ARTIFACTS_SERVER:-false}" = "true" ] && \
+   [ "${ARTIFACTS_SERVER_GATEWAY:-false}" != "true" ] && \
+   [[ ",${ARTIFACT_BACKENDS}," == *,s3,* ]]; then
+  docker_args+=(
+    --add-host "mlflow-artifacts.${NAMESPACE}.svc:127.0.0.1"
+  )
+fi
 
 for name in \
   SKIP_DEPLOYMENT \

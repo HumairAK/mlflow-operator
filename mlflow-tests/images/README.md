@@ -144,7 +144,7 @@ certificate verification.
 | `MLFLOW_OPERATOR_BRANCH` | `main` | Branch to pull manifests from for CSV patching. |
 | `INFRASTRUCTURE_PLATFORM` | _(auto)_ | Infrastructure overlay: `base` or `openshift`. When unset, the harness inspects `route.openshift.io` and selects `openshift` only if route resources are actually present; otherwise it uses `base`. |
 | `FORCE_PORT_FORWARD` | `false` | Force the harness to port-forward the MLflow service to `localhost:8443` even on OpenShift, instead of using the MLflow CR `status.url`. |
-| `ARTIFACTS_SERVER` | `false` | Enable the dedicated artifact Deployment. Requires PostgreSQL backend/registry stores, one or more `file`, `s3`, or `externals3` backends, and the `HTTPRoute` CRD. Normal runs may use multiple backends; generic Kubernetes uses a direct Service port-forward on `localhost:8444`. |
+| `ARTIFACTS_SERVER` | `false` | Enable the dedicated artifact Deployment. Requires PostgreSQL backend/registry stores, one or more `file`, `s3`, or `externals3` backends, and the `HTTPRoute` CRD. Generic Kubernetes normally uses a direct Service port-forward on `localhost:8444`; its split S3 GC row persists the in-cluster artifact Service DNS name and uses the Service TLS port instead. |
 | `ARTIFACTS_SERVER_GATEWAY` | `false` | Also require live OpenShift Gateway acceptance and run tracking-relative rewrite assertions. |
 
 ### Skip / control flags
@@ -211,6 +211,11 @@ OpenShift with a working data science Gateway to additionally validate route acc
 Direct local `test-run.sh` invocations on Kind must apply
 `test/crd/httproutes.gateway.networking.k8s.io.yaml` before operator startup; unlike the CI launcher,
 `test-run.sh` does not install cluster CRDs.
+
+For the dedicated artifact-server S3 row, the persisted artifact root is
+`https://mlflow-artifacts.<namespace>.svc:8443`. The CI launcher maps that hostname to its local
+artifact-service port-forward; direct `test-run.sh` use must make the same hostname resolve to
+`127.0.0.1` (for example with an `/etc/hosts` entry) before starting the harness.
 
 ### PostgreSQL metadata store
 

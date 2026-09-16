@@ -101,7 +101,8 @@ Operator / OpenShift:
                           server (default: false). Requires the HTTPRoute API, PostgreSQL
                           backend/registry stores, and file, s3, or externals3 artifacts.
                           Normal runs may exercise multiple artifact backends. Generic Kubernetes
-                          accesses the artifact Service through localhost:8444.
+                          normally accesses the artifact Service through localhost:8444. The
+                          split S3 GC row uses its in-cluster Service DNS name instead.
   ARTIFACTS_SERVER_GATEWAY true|false — validate live Gateway route acceptance and rewrites
                           (default: false). Requires ARTIFACTS_SERVER=true and OpenShift.
 
@@ -1123,7 +1124,13 @@ run_suite_body() {
         if [ "$ARTIFACTS_SERVER" = "true" ] && \
            [ "$ARTIFACTS_SERVER_GATEWAY" != "true" ] && \
            [ "$INFRASTRUCTURE_PLATFORM" != "openshift" ]; then
-            deploy_args+=(--mlflow-url "https://localhost:8444")
+            if [ "$STORAGE_TYPE" = "s3" ]; then
+                # GC runs inside the cluster, so persisted artifact URIs must
+                # target the Service rather than the runner port-forward.
+                deploy_args+=(--mlflow-url "https://mlflow-artifacts.${NAMESPACE}.svc:8443")
+            else
+                deploy_args+=(--mlflow-url "https://localhost:8444")
+            fi
         fi
         [ -n "${MLFLOW_RESOLVED_IMAGE}" ] && deploy_args+=(--mlflow-image "$MLFLOW_RESOLVED_IMAGE")
 
@@ -1263,11 +1270,19 @@ run_suite_body() {
         if [ "$INFRASTRUCTURE_PLATFORM" = "openshift" ] && [ "$FORCE_PORT_FORWARD" = "true" ]; then
             echo "  FORCE_PORT_FORWARD=true, using localhost port-forward instead of MLflow CR status.url"
         fi
-        echo "  Port-forwarding MLflow service to localhost:8443..."
-        kubectl port-forward "svc/${MLFLOW_NAME}" -n "$NAMESPACE" 8443:8443 &
+        local tracking_port=8443
+        if [ "$ARTIFACTS_SERVER" = "true" ] && \
+           [ "$ARTIFACTS_SERVER_GATEWAY" != "true" ] && \
+           [ "$INFRASTRUCTURE_PLATFORM" != "openshift" ] && \
+           [ "$STORAGE_TYPE" = "s3" ]; then
+            # Reserve the Service's native TLS port for the artifact endpoint.
+            tracking_port=8442
+        fi
+        echo "  Port-forwarding MLflow service to localhost:${tracking_port}..."
+        kubectl port-forward "svc/${MLFLOW_NAME}" -n "$NAMESPACE" "${tracking_port}:8443" &
         PF_PID=$!
         sleep 2
-        export MLFLOW_TRACKING_URI="https://localhost:8443${mlflow_base_path}"
+        export MLFLOW_TRACKING_URI="https://localhost:${tracking_port}${mlflow_base_path}"
     fi
     echo "  MLFLOW_TRACKING_URI=$MLFLOW_TRACKING_URI"
 
@@ -1298,11 +1313,21 @@ run_suite_body() {
             published_artifacts_url="$(kubectl get mlflow "$MLFLOW_NAME" -n "$NAMESPACE" -o jsonpath='{.status.artifactsUrl}')"
             export MLFLOW_ARTIFACTS_URI="${published_artifacts_url%/api/2.0/mlflow-artifacts/artifacts}"
         else
-            echo "  Port-forwarding dedicated artifact service to localhost:8444..."
-            kubectl port-forward "svc/mlflow-artifacts" -n "$NAMESPACE" 8444:8443 &
+            local artifacts_port=8444
+            local artifacts_uri_host="localhost"
+            if [ "$STORAGE_TYPE" = "s3" ] && \
+               [ "$INFRASTRUCTURE_PLATFORM" != "openshift" ]; then
+                # Keep the URI persisted by MLflow identical to the one a GC
+                # Job resolves in-cluster. The launcher maps this host to the
+                # local port-forward for the external test client.
+                artifacts_port=8443
+                artifacts_uri_host="mlflow-artifacts.${NAMESPACE}.svc"
+            fi
+            echo "  Port-forwarding dedicated artifact service to localhost:${artifacts_port}..."
+            kubectl port-forward "svc/mlflow-artifacts" -n "$NAMESPACE" "${artifacts_port}:8443" &
             ARTIFACTS_PF_PID=$!
             sleep 2
-            export MLFLOW_ARTIFACTS_URI="https://localhost:8444/mlflow-artifacts"
+            export MLFLOW_ARTIFACTS_URI="https://${artifacts_uri_host}:${artifacts_port}/mlflow-artifacts"
         fi
         echo "  MLFLOW_ARTIFACTS_URI=$MLFLOW_ARTIFACTS_URI"
     fi
