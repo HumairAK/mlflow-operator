@@ -171,6 +171,7 @@ def _wait_for_job(
     )
 
 
+@pytest.mark.artifacts_server
 @pytest.mark.smoke
 @pytest.mark.skipif(
     Config.ARTIFACT_STORAGE != "s3" or not Config.GARBAGE_COLLECTION_ENABLED,
