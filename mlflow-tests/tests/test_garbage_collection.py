@@ -14,15 +14,16 @@ import mlflow
 import pytest
 from botocore.config import Config as BotocoreConfig
 from botocore.exceptions import ClientError
-from mlflow.exceptions import MlflowException
 from kubernetes import client
 from kubernetes.client.rest import ApiException
 from kubernetes.stream import stream
+from mlflow.exceptions import MlflowException
 
 from mlflow_tests.utils.client import ClientManager
 
 from .base import TestBase
 from .constants.config import Config
+from .http_utils import get_s3_verify_value
 
 logger = logging.getLogger(__name__)
 
@@ -38,15 +39,11 @@ def _s3_client():
         "service_name": "s3",
         "aws_access_key_id": Config.AWS_ACCESS_KEY,
         "aws_secret_access_key": Config.AWS_SECRET_KEY,
+        "verify": get_s3_verify_value(Config.S3_URL),
     }
     if Config.S3_URL:
         kwargs["endpoint_url"] = Config.S3_URL
         kwargs["config"] = BotocoreConfig(s3={"addressing_style": "path"})
-        if (
-            Config.S3_URL.startswith("https://localhost:")
-            and Config.DISABLE_TLS == "true"
-        ):
-            kwargs["verify"] = False
     return boto3.client(**kwargs)
 
 

@@ -702,7 +702,14 @@ restore_test_ca_bundle_environment() {
 
 configure_test_ca_bundle() {
     restore_test_ca_bundle_environment
-    if [ "$STORAGE_TYPE" != "s3" ] || [ "$SEAWEEDFS_TLS" != "true" ]; then
+    local needs_ca_bundle=false
+    if [ "$STORAGE_TYPE" = "s3" ] && [ "$SEAWEEDFS_TLS" = "true" ]; then
+        needs_ca_bundle=true
+    elif [ "$STORAGE_TYPE" = "externals3" ] && \
+         { [ -n "$CA_BUNDLE_PATH" ] || [ -n "$CA_BUNDLE_CONFIGMAP" ]; }; then
+        needs_ca_bundle=true
+    fi
+    if [ "$needs_ca_bundle" != "true" ]; then
         return 0
     fi
 
@@ -715,12 +722,23 @@ configure_test_ca_bundle() {
     done
     _TEST_CA_ENV_CAPTURED=true
 
-    local configmap_name="${CA_BUNDLE_CONFIGMAP:-mlflow-ca-bundle}"
     local custom_ca_file
     custom_ca_file="$(mktemp)"
     TEST_CA_BUNDLE_FILE="$(mktemp)"
 
-    if ! kubectl get configmap "$configmap_name" --namespace "$NAMESPACE" -o json \
+    local ca_source
+    if [ -n "$CA_BUNDLE_PATH" ]; then
+        if [ ! -r "$CA_BUNDLE_PATH" ]; then
+            echo "ERROR: CA bundle file is not readable: ${CA_BUNDLE_PATH}" >&2
+            rm -f "$custom_ca_file"
+            restore_test_ca_bundle_environment
+            return 1
+        fi
+        cp "$CA_BUNDLE_PATH" "$custom_ca_file"
+        ca_source="CA bundle file ${CA_BUNDLE_PATH}"
+    else
+        local configmap_name="${CA_BUNDLE_CONFIGMAP:-mlflow-ca-bundle}"
+        if ! kubectl get configmap "$configmap_name" --namespace "$NAMESPACE" -o json \
         | uv run --project "$UV_PROJECT_DIR" --no-sync python -c '
 import json
 import sys
@@ -731,13 +749,15 @@ if not certificates:
     raise SystemExit("ConfigMap has no .crt or .pem entries")
 sys.stdout.write("\n".join(certificates))
 ' > "$custom_ca_file"; then
-        echo "ERROR: Failed to read .crt or .pem certificates from ConfigMap ${configmap_name}" >&2
-        rm -f "$custom_ca_file"
-        restore_test_ca_bundle_environment
-        return 1
+            echo "ERROR: Failed to read .crt or .pem certificates from ConfigMap ${configmap_name}" >&2
+            rm -f "$custom_ca_file"
+            restore_test_ca_bundle_environment
+            return 1
+        fi
+        ca_source="ConfigMap ${configmap_name}"
     fi
     if ! grep -q "BEGIN CERTIFICATE" "$custom_ca_file"; then
-        echo "ERROR: ConfigMap ${configmap_name} does not contain a valid CA certificate" >&2
+        echo "ERROR: ${ca_source} does not contain a valid CA certificate" >&2
         rm -f "$custom_ca_file"
         restore_test_ca_bundle_environment
         return 1
@@ -757,7 +777,7 @@ sys.stdout.write("\n".join(certificates))
     export REQUESTS_CA_BUNDLE="$TEST_CA_BUNDLE_FILE"
     export CURL_CA_BUNDLE="$TEST_CA_BUNDLE_FILE"
     export AWS_CA_BUNDLE="$TEST_CA_BUNDLE_FILE"
-    echo "  Configured test clients to trust ${configmap_name}"
+    echo "  Configured test clients to trust ${ca_source}"
 }
 
 wait_for_mlflow_cr_available() {
@@ -1368,7 +1388,7 @@ run_suite_body() {
     fi
     if ! configure_test_ca_bundle; then
         fail_suite "test_configure_ca_bundle" \
-            "Failed to configure test clients with the SeaweedFS CA bundle"
+            "Failed to configure test clients with the configured CA bundle"
         return 1
     fi
 

@@ -110,6 +110,8 @@ The script is configured entirely via environment variables. Variables can also 
 | `AWS_SECRET_ACCESS_KEY` | _(unset)_ | S3 secret key (`STORAGE_TYPE=s3` only). |
 | `BUCKET` | _(unset)_ | S3 bucket name (`STORAGE_TYPE=s3` only). |
 | `S3_ENDPOINT_URL` | _(unset)_ | S3 endpoint URL (`STORAGE_TYPE=s3` only). |
+| `CA_BUNDLE_PATH` | _(unset)_ | PEM bundle for a private-CA S3 endpoint. The container launcher mounts this file read-only. |
+| `CA_BUNDLE_CONFIGMAP` | _(unset)_ | Existing ConfigMap containing the PEM bundle for a private-CA S3 endpoint. |
 | `DB_HOST` | _(auto)_ | PostgreSQL hostname (when either metadata store uses `postgres`). |
 | `DB_PORT` | `5432` | PostgreSQL port (when either metadata store uses `postgres`). |
 | `DB_USER` | `mlflow` | PostgreSQL username. Custom values require reused/external PostgreSQL via `SKIP_INFRASTRUCTURE=true`. |
@@ -126,6 +128,12 @@ extracts all `.crt` and `.pem` entries from the configured CA ConfigMap and
 configures the test clients to trust them. This lets multipart downloads reach
 SeaweedFS without changing the in-cluster endpoint used by MLflow or disabling
 certificate verification.
+
+For `externals3`, set `CA_BUNDLE_PATH` or `CA_BUNDLE_CONFIGMAP` when the S3
+endpoint uses a private CA. The harness exports the supplied PEM file or the
+certificate entries in the ConfigMap to direct artifact downloads, trace-archive
+checks, and garbage-collection checks. Otherwise, these clients follow
+`DISABLE_TLS`, like the rest of the test configuration.
 
 ### Infrastructure image overrides
 
