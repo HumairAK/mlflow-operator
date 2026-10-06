@@ -152,7 +152,10 @@ checks, and garbage-collection checks. Otherwise, these clients follow
 The harness deploys the operator from the test image's manifests by default on both
 Kubernetes and OpenShift. Set `SKIP_OPERATOR=true` when using an operator already
 installed by RHOAI or ODH, regardless of its OLM version. Set `SKIP_DEPLOYMENT=true`
-to reuse the existing MLflow instance as well.
+to reuse the existing MLflow instance as well. Direct split-server suites refresh
+harness-owned operator configuration between backends so persisted artifact URLs
+match the active port-forward. Explicit `SKIP_OPERATOR=true` always preserves the
+installed operator.
 
 CSV-based manifest injection has been retired. `DEPLOY_MLFLOW_OPERATOR=false` is
 accepted for compatibility with existing environments; other nonempty values fail
@@ -164,7 +167,7 @@ manifest-download settings are no longer used.
 |----------|---------|-------------|
 | `INFRASTRUCTURE_PLATFORM` | _(auto)_ | Infrastructure overlay: `base` or `openshift`. When unset, the harness inspects `route.openshift.io` and selects `openshift` only if route resources are actually present; otherwise it uses `base`. |
 | `FORCE_PORT_FORWARD` | _(auto)_ | On OpenShift, defaults to `true` when deploying the operator without Gateway validation, and `false` when reusing an installed operator or MLflow instance. Explicit `true` selects localhost port-forwarding; explicit `false` selects `status.url`. Gateway validation requires public routing. |
-| `ARTIFACTS_SERVER` | `false` | Enable the dedicated artifact Deployment. Requires PostgreSQL backend/registry stores, one or more `file`, `s3`, or `externals3` backends, and the `HTTPRoute` CRD. Direct access uses an artifact Service port-forward on `localhost:8444`; S3 runs persist the artifact Service DNS name on port 8443 so in-cluster GC can reach it, with tracking forwarded on port 8442. |
+| `ARTIFACTS_SERVER` | `false` | Enable the dedicated artifact Deployment. Requires PostgreSQL backend/registry stores, one or more `file`, `s3`, or `externals3` backends, and the `HTTPRoute` CRD. Direct access uses an artifact Service port-forward on `localhost:8444`; Both `s3` and `externals3` runs persist the artifact Service DNS name on port 8443 so in-cluster GC can reach it, with tracking forwarded on port 8442. |
 | `ARTIFACTS_SERVER_GATEWAY` | `false` | Also require live OpenShift Gateway acceptance and run tracking-relative rewrite assertions. |
 
 ### Skip / control flags

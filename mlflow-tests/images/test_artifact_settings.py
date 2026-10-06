@@ -115,6 +115,7 @@ def artifact_settings_harness(
                         "MLFLOW_ARTIFACTS_URI=${MLFLOW_ARTIFACTS_URI-unset}" \\
                         "MLFLOW_ARTIFACTS_ROOT=${MLFLOW_ARTIFACTS_ROOT-unset}" \\
                         "MLFLOW_TRACKING_URI=$MLFLOW_TRACKING_URI" > "$PYTEST_ENV_LOG"
+                    cp "$PYTEST_ENV_LOG" "${PYTEST_ENV_LOG}.${artifact_storage}"
                     ;;
             esac
             exit 0
@@ -574,6 +575,7 @@ def test_installed_openshift_operator_keeps_gateway_readiness(
     [
         ("file", 8443, "localhost", 8444),
         ("s3", 8442, "mlflow-artifacts.test-namespace.svc", 8443),
+        ("externals3", 8442, "mlflow-artifacts.test-namespace.svc", 8443),
     ],
 )
 def test_standalone_openshift_split_server_uses_direct_service_urls(
@@ -592,6 +594,9 @@ def test_standalone_openshift_split_server_uses_direct_service_urls(
             "BACKEND_STORE": "postgres",
             "REGISTRY_STORE": "postgres",
             "ARTIFACT_BACKENDS": backend,
+            "AWS_ACCESS_KEY_ID": "fake-test-key",
+            "AWS_SECRET_ACCESS_KEY": "fake-test-secret",
+            "BUCKET": "fake-test-bucket",
         }
     )
 
@@ -656,3 +661,150 @@ def test_standalone_openshift_preserves_requested_gateway_access(
         "https://configured-gateway.example/mlflow/api/3.0/mlflow/server-info"
         in (tmp_path / "curl.log").read_text()
     )
+
+
+@pytest.mark.parametrize("platform", ["base", "openshift"])
+@pytest.mark.parametrize("s3_backend", ["s3", "externals3"])
+@pytest.mark.parametrize("s3_first", [False, True], ids=["file-first", "s3-first"])
+def test_direct_split_server_refreshes_operator_url_between_suites(
+    tmp_path: Path,
+    artifact_settings_harness: Callable[..., subprocess.CompletedProcess[str]],
+    platform: str,
+    s3_backend: str,
+    s3_first: bool,
+) -> None:
+    backends = [s3_backend, "file"] if s3_first else ["file", s3_backend]
+    result = artifact_settings_harness(
+        {
+            "SKIP_DEPLOYMENT": "false",
+            "SKIP_OPERATOR": "false",
+            "INFRASTRUCTURE_PLATFORM": platform,
+            "ARTIFACTS_SERVER_GATEWAY": "false",
+            "BACKEND_STORE": "postgres",
+            "REGISTRY_STORE": "postgres",
+            "ARTIFACT_BACKENDS": ",".join(backends),
+            "AWS_ACCESS_KEY_ID": "fake-test-key",
+            "AWS_SECRET_ACCESS_KEY": "fake-test-secret",
+            "BUCKET": "fake-test-bucket",
+        }
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    deployments = [
+        line
+        for line in (tmp_path / "uv.log").read_text().splitlines()
+        if "deploy.py" in line
+    ]
+    assert len(deployments) == 2
+    for backend, deployment in zip(backends, deployments, strict=True):
+        assert "--skip-operator" not in deployment
+        base_url = (
+            "https://localhost:8444"
+            if backend == "file"
+            else "https://mlflow-artifacts.test-namespace.svc:8443"
+        )
+        assert f"--mlflow-url {base_url}" in deployment
+        suite = "file" if backend == "file" else "s3"
+        exports = dict(
+            line.split("=", 1)
+            for line in (tmp_path / f"pytest.env.{suite}").read_text().splitlines()
+        )
+        assert exports["MLFLOW_ARTIFACTS_URI"] == f"{base_url}/mlflow-artifacts"
+        assert exports["MLFLOW_ARTIFACTS_ROOT"] == (
+            f"{base_url}/mlflow-artifacts/api/2.0/mlflow-artifacts/artifacts"
+        )
+        port = 8443 if backend == "file" else 8442
+        assert exports["MLFLOW_TRACKING_URI"] == f"https://localhost:{port}/mlflow"
+
+
+@pytest.mark.parametrize("s3_backend", ["s3", "externals3"])
+def test_direct_split_server_never_refreshes_explicitly_reused_operator(
+    tmp_path: Path,
+    artifact_settings_harness: Callable[..., subprocess.CompletedProcess[str]],
+    s3_backend: str,
+) -> None:
+    result = artifact_settings_harness(
+        {
+            "SKIP_DEPLOYMENT": "false",
+            "SKIP_OPERATOR": "true",
+            "FORCE_PORT_FORWARD": "true",
+            "ARTIFACTS_SERVER_GATEWAY": "false",
+            "BACKEND_STORE": "postgres",
+            "REGISTRY_STORE": "postgres",
+            "ARTIFACT_BACKENDS": f"file,{s3_backend}",
+            "AWS_ACCESS_KEY_ID": "fake-test-key",
+            "AWS_SECRET_ACCESS_KEY": "fake-test-secret",
+            "BUCKET": "fake-test-bucket",
+        }
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    deployments = [
+        line
+        for line in (tmp_path / "uv.log").read_text().splitlines()
+        if "deploy.py" in line
+    ]
+    assert len(deployments) == 2
+    assert all("--skip-operator" in line for line in deployments)
+    assert not (tmp_path / "operator.url").exists()
+
+
+@pytest.mark.parametrize(
+    "backend,gateway,expect_artifact_host,expect_minio_host",
+    [
+        ("s3", "false", True, True),
+        ("externals3", "false", True, False),
+        ("externals3", "true", False, False),
+        ("file", "false", False, False),
+    ],
+)
+def test_test_container_maps_direct_artifact_service_host(
+    tmp_path: Path,
+    backend: str,
+    gateway: str,
+    expect_artifact_host: bool,
+    expect_minio_host: bool,
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_executable(fake_bin / "kubectl", "#!/bin/sh\nprintf 'True'\n")
+    docker_log = tmp_path / "docker.args"
+    _write_executable(
+        fake_bin / "docker", '#!/bin/sh\nprintf "%s\\n" "$@" > "$DOCKER_LOG"\n'
+    )
+    env = os.environ | {
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+        "DOCKER_LOG": str(docker_log),
+        "TEST_RESULTS_DIR": str(tmp_path / "results"),
+        "NAMESPACE": "test-namespace",
+        "MLFLOW_TESTS_RUNTIME_IMAGE": "tests:fake",
+        "OPERATOR_RUNTIME_IMAGE": "operator:fake",
+        "MLFLOW_RUNTIME_IMAGE": "mlflow:fake",
+        "BACKEND_STORE": "postgres",
+        "REGISTRY_STORE": "postgres",
+        "ARTIFACT_BACKENDS": backend,
+        "SERVE_ARTIFACTS": "false",
+        "ARTIFACTS_SERVER": "true",
+        "ARTIFACTS_SERVER_GATEWAY": gateway,
+        "AWS_ACCESS_KEY_ID": "fake-test-key",
+        "AWS_SECRET_ACCESS_KEY": "fake-test-secret",
+        "AWS_S3_BUCKET": "fake-test-bucket",
+    }
+    env.pop("CA_BUNDLE_PATH", None)
+    result = subprocess.run(
+        [bash_with_mapfile(), Path(__file__).with_name("run-integration-tests.sh")],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    args = docker_log.read_text().splitlines()
+    assert (
+        "mlflow-artifacts.test-namespace.svc:127.0.0.1" in args
+    ) == expect_artifact_host
+    assert (
+        "minio-service.test-namespace.svc.cluster.local:127.0.0.1" in args
+    ) == expect_minio_host

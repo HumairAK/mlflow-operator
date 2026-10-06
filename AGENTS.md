@@ -314,7 +314,11 @@ other nonempty values with a config JUnit error before deployment. Do not infer
 operator reuse from the OLM version. For standalone OpenShift deployments without
 Gateway validation, default to port-forwarding; installed operators and reused
 MLflow instances retain public routing. Honor explicit `FORCE_PORT_FORWARD` values
-and keep split artifact-server deployment URLs and forwarded ports aligned.
+and keep split artifact-server deployment URLs and forwarded ports aligned. Direct
+split-server suites must refresh harness-owned operator configuration across
+backend changes while honoring explicit `SKIP_OPERATOR=true`. Both `s3` and
+`externals3` need the in-cluster artifact Service URL for GC; map that host in the
+external test launcher, while mapping SeaweedFS only for `s3`.
 
 ### MLflow upgrade pytest phases
 

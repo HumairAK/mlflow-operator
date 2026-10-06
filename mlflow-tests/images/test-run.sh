@@ -7,7 +7,8 @@
 #
 # Multi-suite mode:
 #   By default the script runs tests twice — once with file storage and once with S3 —
-#   sharing the operator setup, workspace namespaces, and RBAC across both runs.
+#   sharing workspace namespaces and RBAC across both runs. Direct split-server
+#   suites refresh harness-owned operator config so artifact URLs follow each backend.
 #   Control which backends run via ARTIFACT_BACKENDS (e.g. ARTIFACT_BACKENDS=file or ARTIFACT_BACKENDS=s3).
 
 set -euo pipefail
@@ -1161,10 +1162,12 @@ run_suite_body() {
             --serve-artifacts       "$SERVE_ARTIFACTS"
         )
         [ "$ARTIFACTS_SERVER" = "true" ] && deploy_args+=(--artifacts-server)
+        local direct_artifact_access=false
         if [ "$ARTIFACTS_SERVER" = "true" ] && \
            [ "$ARTIFACTS_SERVER_GATEWAY" != "true" ] && \
            { [ "$INFRASTRUCTURE_PLATFORM" != "openshift" ] || [ "$FORCE_PORT_FORWARD" = "true" ]; }; then
-            if [ "$STORAGE_TYPE" = "s3" ]; then
+            direct_artifact_access=true
+            if [ "$STORAGE_TYPE" = "s3" ] || [ "$STORAGE_TYPE" = "externals3" ]; then
                 # GC runs inside the cluster, so persisted artifact URIs must
                 # target the Service rather than the runner port-forward.
                 deploy_args+=(--mlflow-url "https://mlflow-artifacts.${NAMESPACE}.svc:8443")
@@ -1184,9 +1187,10 @@ run_suite_body() {
         [ -n "${CA_BUNDLE_CONFIGMAP:-}" ] && deploy_args+=(--ca-bundle-configmap  "$CA_BUNDLE_CONFIGMAP")
         [ -n "${WORKSPACE_LABEL_SELECTOR:-}" ] && deploy_args+=(--workspace-label-selector "$WORKSPACE_LABEL_SELECTOR")
 
-        # Reuse an installed operator or the one deployed by a previous suite.
+        # Direct split-server suites change the persisted artifact URL by backend,
+        # so reapply harness-owned operator config. Never replace an installed one.
         if [ "$SKIP_OPERATOR" = "true" ] || \
-           [ "$_OPERATOR_DEPLOYED" = "true" ]; then
+           { [ "$_OPERATOR_DEPLOYED" = "true" ] && [ "$direct_artifact_access" != "true" ]; }; then
             deploy_args+=(--skip-operator)
         fi
 
@@ -1312,7 +1316,7 @@ run_suite_body() {
         if [ "$ARTIFACTS_SERVER" = "true" ] && \
            [ "$ARTIFACTS_SERVER_GATEWAY" != "true" ] && \
            { [ "$INFRASTRUCTURE_PLATFORM" != "openshift" ] || [ "$FORCE_PORT_FORWARD" = "true" ]; } && \
-           [ "$STORAGE_TYPE" = "s3" ]; then
+           { [ "$STORAGE_TYPE" = "s3" ] || [ "$STORAGE_TYPE" = "externals3" ]; }; then
             # Reserve the Service's native TLS port for the artifact endpoint.
             tracking_port=8442
         fi
@@ -1358,7 +1362,7 @@ run_suite_body() {
         else
             local artifacts_port=8444
             local artifacts_uri_host="localhost"
-            if [ "$STORAGE_TYPE" = "s3" ] && \
+            if { [ "$STORAGE_TYPE" = "s3" ] || [ "$STORAGE_TYPE" = "externals3" ]; } && \
                { [ "$INFRASTRUCTURE_PLATFORM" != "openshift" ] || [ "$FORCE_PORT_FORWARD" = "true" ]; }; then
                 # Keep the URI persisted by MLflow identical to the one a GC
                 # Job resolves in-cluster. The launcher maps this host to the

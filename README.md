@@ -664,7 +664,10 @@ The integration harness deploys the operator from the test image's manifests by 
 Set `SKIP_OPERATOR=true` to reuse an operator installed by RHOAI or ODH, independently
 of its OLM version. On OpenShift, harness-deployed operators default to port-forwarding
 when Gateway validation is not requested; reused installations retain gateway access.
-Explicit `FORCE_PORT_FORWARD` settings override that selection. CSV-based manifest injection has been retired; existing
+Explicit `FORCE_PORT_FORWARD` settings override that selection. Direct split-server
+suites refresh harness-owned operator configuration between backends; both S3
+backends use cluster-reachable artifact Service URLs for garbage collection.
+CSV-based manifest injection has been retired; existing
 `DEPLOY_MLFLOW_OPERATOR=false` settings remain accepted, while requests to enable
 injection fail with migration guidance. See the [harness documentation](mlflow-tests/images/README.md).
 
