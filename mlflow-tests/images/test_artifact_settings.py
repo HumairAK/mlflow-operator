@@ -39,9 +39,22 @@ def artifact_settings_harness(
                         echo 'Error from server (Forbidden): cannot get MLflow status' >&2
                         exit "$CR_STATUS_READ_EXIT"
                     fi
-                    printf '%s' "$CR_STATUS_ARTIFACTS_URL"
+                    if [ -f "$OPERATOR_URL_FILE" ]; then
+                        printf '%s/mlflow-artifacts/api/2.0/mlflow-artifacts/artifacts' "$(cat "$OPERATOR_URL_FILE")"
+                    else
+                        printf '%s' "$CR_STATUS_ARTIFACTS_URL"
+                    fi
                     ;;
-                *"jsonpath={.status.url}"*) printf 'https://mlflow.example/mlflow' ;;
+                *"jsonpath={.status.url}"*)
+                    if [ -f "$OPERATOR_URL_FILE" ]; then
+                        operator_url=$(cat "$OPERATOR_URL_FILE")
+                        if [ -n "$operator_url" ]; then
+                            printf '%s/mlflow' "$operator_url"
+                        fi
+                    else
+                        printf '%s' "$CR_STATUS_URL"
+                    fi
+                    ;;
                 *"get httproute mlflow-artifacts"*) printf 'Accepted=True\\nResolvedRefs=True\\n' ;;
                 *"create token"*) printf 'fake-token' ;;
             esac
@@ -54,6 +67,10 @@ def artifact_settings_harness(
         dedent(
             """\
             #!/bin/sh
+            echo "$*" >> "$CURL_LOG"
+            case "$*" in
+                *gateway-hostname-placeholder*) printf '000'; exit 7 ;;
+            esac
             while [ "$#" -gt 0 ]; do
                 if [ "$1" = -o ]; then
                     printf '{}' > "$2"
@@ -73,6 +90,24 @@ def artifact_settings_harness(
             #!/bin/sh
             echo "$*" >> "$UV_LOG"
             case "$*" in
+                *deploy.py*)
+                    case " $* " in
+                        *" --skip-operator "*) ;;
+                        *)
+                            # Model the operator URL from the actual overlay and
+                            # the URL override passed by the harness to deploy.py.
+                            operator_url=$(sed -n 's/^mlflow-url=//p' "$OPERATOR_PARAMS_ENV")
+                            previous=""
+                            for argument in "$@"; do
+                                if [ "$previous" = "--mlflow-url" ]; then
+                                    operator_url="$argument"
+                                fi
+                                previous="$argument"
+                            done
+                            printf '%s' "$operator_url" > "$OPERATOR_URL_FILE"
+                            ;;
+                    esac
+                    ;;
                 *pytest*)
                     printf '%s\\n' "artifacts_server=$artifacts_server" \\
                         "serve_artifacts=$serve_artifacts" \\
@@ -89,10 +124,17 @@ def artifact_settings_harness(
     env = os.environ.copy()
     env.pop("DB_TYPE", None)
     env.pop("DEPLOY_MLFLOW_OPERATOR", None)
+    env.pop("FORCE_PORT_FORWARD", None)
     env.update(
         {
             "PATH": f"{fake_bin}{os.pathsep}{env['PATH']}",
             "KUBECTL_LOG": str(tmp_path / "kubectl.log"),
+            "CURL_LOG": str(tmp_path / "curl.log"),
+            "OPERATOR_URL_FILE": str(tmp_path / "operator.url"),
+            "OPERATOR_PARAMS_ENV": str(
+                Path(__file__).parents[2]
+                / ".github/test-infra/overlays/kind/params.env"
+            ),
             "UV_LOG": str(tmp_path / "uv.log"),
             "PYTEST_ENV_LOG": str(tmp_path / "pytest.env"),
             "TEST_RESULTS_DIR": str(tmp_path / "results"),
@@ -101,12 +143,12 @@ def artifact_settings_harness(
             "CR_READ_EXIT": "0",
             "CR_ARTIFACT_SETTINGS": "false|true",
             "CR_STATUS_READ_EXIT": "0",
+            "CR_STATUS_URL": "https://mlflow.example/mlflow",
             "CR_STATUS_ARTIFACTS_URL": "https://mlflow.example/mlflow-artifacts/api/2.0/mlflow-artifacts/artifacts",
             "ARTIFACTS_SERVER": "true",
             "ARTIFACTS_SERVER_GATEWAY": "true",
             "SERVE_ARTIFACTS": "false",
             "INFRASTRUCTURE_PLATFORM": "openshift",
-            "FORCE_PORT_FORWARD": "false",
             "SKIP_DEPLOYMENT": "true",
             "SKIP_OPERATOR": "true",
             "SKIP_INFRASTRUCTURE": "true",
@@ -459,3 +501,158 @@ def test_retired_injection_request_fails_before_deployment(
     error = case.find("error")
     assert error is not None
     assert "manifest injection has been retired" in error.get("message", "")
+
+
+@pytest.mark.parametrize(
+    "operator_url", [None, ""], ids=["placeholder-gateway", "no-public-route"]
+)
+def test_standalone_openshift_readiness_uses_port_forward(
+    tmp_path: Path,
+    artifact_settings_harness: Callable[..., subprocess.CompletedProcess[str]],
+    operator_url: str | None,
+) -> None:
+    overrides = {
+        "SKIP_DEPLOYMENT": "false",
+        "SKIP_OPERATOR": "false",
+        "ARTIFACTS_SERVER": "false",
+        "ARTIFACTS_SERVER_GATEWAY": "false",
+    }
+    if operator_url is not None:
+        params = tmp_path / "params.env"
+        params.write_text(f"mlflow-url={operator_url}\n")
+        overrides["OPERATOR_PARAMS_ENV"] = str(params)
+    result = artifact_settings_harness(overrides)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (
+        "gateway-hostname-placeholder" in (tmp_path / "operator.url").read_text()
+        or operator_url == ""
+    )
+    assert (
+        read_exports(tmp_path)["MLFLOW_TRACKING_URI"] == "https://localhost:8443/mlflow"
+    )
+    commands = (tmp_path / "kubectl.log").read_text()
+    assert "port-forward svc/mlflow -n test-namespace 8443:8443" in commands
+    assert "jsonpath={.status.url}" not in commands
+    probes = (tmp_path / "curl.log").read_text()
+    assert "https://localhost:8443/mlflow/api/3.0/mlflow/server-info" in probes
+    assert "gateway-hostname-placeholder" not in probes
+
+
+@pytest.mark.parametrize("gateway", ["false", "true"])
+def test_installed_openshift_operator_keeps_gateway_readiness(
+    tmp_path: Path,
+    artifact_settings_harness: Callable[..., subprocess.CompletedProcess[str]],
+    gateway: str,
+) -> None:
+    result = artifact_settings_harness(
+        {
+            "SKIP_DEPLOYMENT": "false",
+            "SKIP_OPERATOR": "true",
+            "ARTIFACTS_SERVER": gateway,
+            "ARTIFACTS_SERVER_GATEWAY": gateway,
+            "BACKEND_STORE": "postgres",
+            "REGISTRY_STORE": "postgres",
+        }
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (
+        read_exports(tmp_path)["MLFLOW_TRACKING_URI"] == "https://mlflow.example/mlflow"
+    )
+    commands = (tmp_path / "kubectl.log").read_text()
+    assert "jsonpath={.status.url}" in commands
+    assert "port-forward svc/mlflow " not in commands
+    assert (
+        "https://mlflow.example/mlflow/api/3.0/mlflow/server-info"
+        in (tmp_path / "curl.log").read_text()
+    )
+
+
+@pytest.mark.parametrize(
+    "backend,tracking_port,artifact_host,artifact_port",
+    [
+        ("file", 8443, "localhost", 8444),
+        ("s3", 8442, "mlflow-artifacts.test-namespace.svc", 8443),
+    ],
+)
+def test_standalone_openshift_split_server_uses_direct_service_urls(
+    tmp_path: Path,
+    artifact_settings_harness: Callable[..., subprocess.CompletedProcess[str]],
+    backend: str,
+    tracking_port: int,
+    artifact_host: str,
+    artifact_port: int,
+) -> None:
+    result = artifact_settings_harness(
+        {
+            "SKIP_DEPLOYMENT": "false",
+            "SKIP_OPERATOR": "false",
+            "ARTIFACTS_SERVER_GATEWAY": "false",
+            "BACKEND_STORE": "postgres",
+            "REGISTRY_STORE": "postgres",
+            "ARTIFACT_BACKENDS": backend,
+        }
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    exported = read_exports(tmp_path)
+    assert (
+        exported["MLFLOW_TRACKING_URI"] == f"https://localhost:{tracking_port}/mlflow"
+    )
+    assert (
+        exported["MLFLOW_ARTIFACTS_URI"]
+        == f"https://{artifact_host}:{artifact_port}/mlflow-artifacts"
+    )
+    assert exported["MLFLOW_ARTIFACTS_ROOT"].startswith(
+        f"https://{artifact_host}:{artifact_port}/"
+    )
+    assert (
+        tmp_path / "operator.url"
+    ).read_text() == f"https://{artifact_host}:{artifact_port}"
+    commands = (tmp_path / "kubectl.log").read_text()
+    assert f"port-forward svc/mlflow -n test-namespace {tracking_port}:8443" in commands
+    assert (
+        f"port-forward svc/mlflow-artifacts -n test-namespace {artifact_port}:8443"
+        in commands
+    )
+    assert "gateway-hostname-placeholder" not in (tmp_path / "curl.log").read_text()
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"FORCE_PORT_FORWARD": "false", "ARTIFACTS_SERVER_GATEWAY": "false"},
+        {"ARTIFACTS_SERVER_GATEWAY": "true"},
+    ],
+    ids=["explicit-gateway-access", "gateway-validation"],
+)
+def test_standalone_openshift_preserves_requested_gateway_access(
+    tmp_path: Path,
+    artifact_settings_harness: Callable[..., subprocess.CompletedProcess[str]],
+    overrides: dict[str, str],
+) -> None:
+    params = tmp_path / "params.env"
+    params.write_text("mlflow-url=https://configured-gateway.example\n")
+    result = artifact_settings_harness(
+        {
+            "SKIP_DEPLOYMENT": "false",
+            "SKIP_OPERATOR": "false",
+            "OPERATOR_PARAMS_ENV": str(params),
+            "BACKEND_STORE": "postgres",
+            "REGISTRY_STORE": "postgres",
+        }
+        | overrides
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert read_exports(tmp_path)["MLFLOW_TRACKING_URI"] == (
+        "https://configured-gateway.example/mlflow"
+    )
+    commands = (tmp_path / "kubectl.log").read_text()
+    assert "jsonpath={.status.url}" in commands
+    assert "port-forward svc/mlflow " not in commands
+    assert (
+        "https://configured-gateway.example/mlflow/api/3.0/mlflow/server-info"
+        in (tmp_path / "curl.log").read_text()
+    )

@@ -85,7 +85,8 @@ Operator / OpenShift:
   INFRASTRUCTURE_PLATFORM Infrastructure overlay: base|openshift
                           (default: auto-detect OpenShift via route.openshift.io, else base)
   FORCE_PORT_FORWARD      true|false — always port-forward the MLflow service to localhost,
-                          even on OpenShift (default: false)
+                          even on OpenShift (default: true for harness-deployed operators
+                          without Gateway validation, false for installed operators)
   ARTIFACTS_SERVER        true|false — enable and test the dedicated metadata-aware artifact
                           server (default: false). Requires the HTTPRoute API, PostgreSQL
                           backend/registry stores, and file, s3, or externals3 artifacts.
@@ -373,7 +374,6 @@ SKIP_INFRASTRUCTURE="${SKIP_INFRASTRUCTURE:-false}"
 SKIP_CLEANUP="${SKIP_CLEANUP:-false}"
 CLEANUP_REUSED_RESOURCES="${CLEANUP_REUSED_RESOURCES:-false}"
 FAIL_FAST="${FAIL_FAST:-true}"
-FORCE_PORT_FORWARD="${FORCE_PORT_FORWARD:-false}"
 SERVE_ARTIFACTS="${SERVE_ARTIFACTS:-${serve_artifacts:-true}}"
 ARTIFACTS_SERVER="${ARTIFACTS_SERVER:-false}"
 ARTIFACTS_SERVER_GATEWAY="${ARTIFACTS_SERVER_GATEWAY:-false}"
@@ -496,6 +496,17 @@ if [ -z "${INFRASTRUCTURE_PLATFORM:-}" ]; then
         INFRASTRUCTURE_PLATFORM="openshift"
     else
         INFRASTRUCTURE_PLATFORM="base"
+    fi
+fi
+
+if [ -z "${FORCE_PORT_FORWARD:-}" ]; then
+    FORCE_PORT_FORWARD=false
+    # The standalone overlay has no real Gateway URL. Reused installations keep
+    # their public route; explicit Gateway tests must also use the public route.
+    if [ "$INFRASTRUCTURE_PLATFORM" = "openshift" ] && \
+       [ "$SKIP_DEPLOYMENT" != "true" ] && [ "$SKIP_OPERATOR" != "true" ] && \
+       [ "$ARTIFACTS_SERVER_GATEWAY" != "true" ]; then
+        FORCE_PORT_FORWARD=true
     fi
 fi
 
@@ -1152,7 +1163,7 @@ run_suite_body() {
         [ "$ARTIFACTS_SERVER" = "true" ] && deploy_args+=(--artifacts-server)
         if [ "$ARTIFACTS_SERVER" = "true" ] && \
            [ "$ARTIFACTS_SERVER_GATEWAY" != "true" ] && \
-           [ "$INFRASTRUCTURE_PLATFORM" != "openshift" ]; then
+           { [ "$INFRASTRUCTURE_PLATFORM" != "openshift" ] || [ "$FORCE_PORT_FORWARD" = "true" ]; }; then
             if [ "$STORAGE_TYPE" = "s3" ]; then
                 # GC runs inside the cluster, so persisted artifact URIs must
                 # target the Service rather than the runner port-forward.
@@ -1300,7 +1311,7 @@ run_suite_body() {
         local tracking_port=8443
         if [ "$ARTIFACTS_SERVER" = "true" ] && \
            [ "$ARTIFACTS_SERVER_GATEWAY" != "true" ] && \
-           [ "$INFRASTRUCTURE_PLATFORM" != "openshift" ] && \
+           { [ "$INFRASTRUCTURE_PLATFORM" != "openshift" ] || [ "$FORCE_PORT_FORWARD" = "true" ]; } && \
            [ "$STORAGE_TYPE" = "s3" ]; then
             # Reserve the Service's native TLS port for the artifact endpoint.
             tracking_port=8442
@@ -1348,7 +1359,7 @@ run_suite_body() {
             local artifacts_port=8444
             local artifacts_uri_host="localhost"
             if [ "$STORAGE_TYPE" = "s3" ] && \
-               [ "$INFRASTRUCTURE_PLATFORM" != "openshift" ]; then
+               { [ "$INFRASTRUCTURE_PLATFORM" != "openshift" ] || [ "$FORCE_PORT_FORWARD" = "true" ]; }; then
                 # Keep the URI persisted by MLflow identical to the one a GC
                 # Job resolves in-cluster. The launcher maps this host to the
                 # local port-forward for the external test client.

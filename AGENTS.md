@@ -311,7 +311,10 @@ The integration harness deploys the operator from test-image manifests unless
 `SKIP_OPERATOR=true` reuses an installed operator. CSV-based manifest injection is
 retired: preserve compatibility with `DEPLOY_MLFLOW_OPERATOR=false`, but reject
 other nonempty values with a config JUnit error before deployment. Do not infer
-operator reuse from the OLM version.
+operator reuse from the OLM version. For standalone OpenShift deployments without
+Gateway validation, default to port-forwarding; installed operators and reused
+MLflow instances retain public routing. Honor explicit `FORCE_PORT_FORWARD` values
+and keep split artifact-server deployment URLs and forwarded ports aligned.
 
 ### MLflow upgrade pytest phases
 
@@ -331,7 +334,7 @@ Selection rules:
 - Harness-driven upgrade phases use the static `upgrade_test_workspace` namespace as the source of truth for both pytest setup and shell-harness RBAC/workspace creation
 - Seeded `pre_upgrade` runs against source MLflow versions before `3.12` must use tracking URIs without the `/mlflow` static prefix; `post_upgrade` and current-version runs still use the prefixed `/mlflow` API path
 - When `INFRASTRUCTURE_PLATFORM` is unset, `mlflow-tests/images/test-run.sh` must treat OpenShift as present only if `kubectl api-resources --api-group=route.openshift.io -o name` returns at least one resource; checking the command exit code alone misdetects Kind as OpenShift and breaks the upstream `postgres:13` overlay selection
-- On OpenShift, `mlflow-tests/images/test-run.sh` now uses the MLflow CR `status.url` gateway address by default, but `FORCE_PORT_FORWARD=true` forces the legacy localhost port-forward path when a run must bypass gateway routing
+- On OpenShift, `mlflow-tests/images/test-run.sh` uses the MLflow CR `status.url` gateway address for installed operators and reused instances; standalone deployments default to port-forwarding unless Gateway validation is requested. Explicit `FORCE_PORT_FORWARD` values override this selection.
 - The chart-managed MLflow pod keeps its liveness probe on `/health` but uses `/api/3.0/mlflow/server-info` for readiness because the Kubernetes auth plugin leaves that route unauthenticated while exercising a more representative API path
 - `mlflow-tests/images/test-run.sh` now uses `kubectl wait --for=condition=Available --timeout=300s` on the MLflow CR and then polls the resolved `MLFLOW_TRACKING_URI` `/api/3.0/mlflow/server-info` endpoint for up to 3 minutes, and it runs `mlflow-tests/images/collect-debug-logs.sh` if pre-pytest readiness checks such as `status.url`, `Available`, `server-info`, or post-upgrade `status.version` time out
 - Pre-pytest harness failures (config validation, `deploy.py`, workspace namespace creation, RBAC, `status.url`, Available, server-info, post-upgrade `status.version`, kube token) must write a failing JUnit XML into `TEST_RESULTS_DIR` as `xunit_report_${STORAGE_TYPE}.xml` (or `xunit_report.xml` when `STORAGE_TYPE` is unset) with suite name from `-o junit_suite_name=…` (default `mlflow-e2e`). Do not overwrite an existing pytest report. Jenkins already archives `*unit*.xml` from `/mlflow/results`; without this file the abort is invisible in Test Result / Report Portal e2e
