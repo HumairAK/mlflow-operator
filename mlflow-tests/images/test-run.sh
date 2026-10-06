@@ -2,12 +2,8 @@
 # test-run.sh: Deploy MLflow and run integration tests.
 #
 # Configured entirely via environment variables (see --help for the full list).
-# Delegates cluster-level deployment to deploy.py; on OpenShift/OLM clusters the
-# operator is patched via CSV instead (default; set DEPLOY_MLFLOW_OPERATOR=false to skip).
-#
-# Platform support:
-#   OpenShift/OLM:           DEPLOY_MLFLOW_OPERATOR=true (default) — CSV patching via patch-csv.sh
-#   Kind/vanilla Kubernetes: DEPLOY_MLFLOW_OPERATOR=false
+# Delegates cluster-level deployment to deploy.py on OpenShift and Kubernetes.
+# Set SKIP_OPERATOR=true to use an operator already installed by RHOAI or ODH.
 #
 # Multi-suite mode:
 #   By default the script runs tests twice — once with file storage and once with S3 —
@@ -22,14 +18,12 @@ TEST_INFRA_ROOT="${TEST_INFRA_ROOT:-$REPO_ROOT/.github/test-infra}"
 UV_PROJECT_DIR="${UV_PROJECT_DIR:-$REPO_ROOT/mlflow-tests}"
 DEPLOY_PY="${DEPLOY_PY:-$REPO_ROOT/.github/actions/deploy/deploy.py}"
 
-# Source env defaults and CSV-patching helpers
+# Source env defaults
 if [ -f "$SCRIPT_DIR/.env" ]; then
     set -o allexport
     source "$SCRIPT_DIR/.env"
     set +o allexport
 fi
-# shellcheck source=patch-csv.sh
-source "$SCRIPT_DIR/patch-csv.sh"
 
 # ─── Usage ────────────────────────────────────────────────────────────────────
 
@@ -88,11 +82,6 @@ TLS (self-deployed infrastructure):
                         Mutually exclusive with CA_BUNDLE_PATH.
 
 Operator / OpenShift:
-  DEPLOY_MLFLOW_OPERATOR  true|false — patch the OLM CSV instead of deploying via kustomize;
-                          use on OpenShift/OLM clusters (default: true)
-  MLFLOW_OPERATOR_OWNER   GitHub owner for CSV manifest download (default: opendatahub-io)
-  MLFLOW_OPERATOR_REPO    GitHub repo for CSV manifest download  (default: mlflow-operator)
-  MLFLOW_OPERATOR_BRANCH  GitHub branch for CSV manifest download (default: main)
   INFRASTRUCTURE_PLATFORM Infrastructure overlay: base|openshift
                           (default: auto-detect OpenShift via route.openshift.io, else base)
   FORCE_PORT_FORWARD      true|false — always port-forward the MLflow service to localhost,
@@ -112,7 +101,8 @@ Skip / control flags:
                         Reads artifact-serving settings from that CR instead of
                         deployment flags. Gateway checks require its artifact
                         server to be enabled and ARTIFACTS_SERVER_GATEWAY=true.
-  SKIP_OPERATOR         true|false — skip operator deployment only (default: false)
+  SKIP_OPERATOR         true|false — reuse an installed operator (default: false).
+                        Set true when testing an existing RHOAI/ODH installation.
   SKIP_INFRASTRUCTURE   true|false — skip PostgreSQL/SeaweedFS deployment (default: false)
   SKIP_CLEANUP          true|false — leave resources in place after the run (default: false).
                         Requires exactly one backend value; use ARTIFACT_BACKENDS=file
@@ -211,7 +201,7 @@ for ((i=0; i<${#PYTEST_ARGS[@]}; i++)); do
     fi
 done
 
-# Create the results dir before any early exit so config/CSV/deploy aborts can
+# Create the results dir before any early exit so config/deploy aborts can
 # still emit JUnit XML into the directory Jenkins archives.
 TEST_RESULTS_DIR="${TEST_RESULTS_DIR:-/mlflow/results}"
 mkdir -p "$TEST_RESULTS_DIR"
@@ -369,13 +359,13 @@ fi
 BACKEND_STORE="${BACKEND_STORE:-sqlite}"
 REGISTRY_STORE="${REGISTRY_STORE:-sqlite}"
 
-# When true (default) the script patches the OLM CSV instead of deploying the operator via kustomize
-# and passes --skip-operator to deploy.py. Infrastructure is NOT automatically skipped —
-# set SKIP_INFRASTRUCTURE=true separately if infra is pre-existing.
-DEPLOY_MLFLOW_OPERATOR="${DEPLOY_MLFLOW_OPERATOR:-true}"
-MLFLOW_OPERATOR_OWNER="${MLFLOW_OPERATOR_OWNER:-opendatahub-io}"
-MLFLOW_OPERATOR_REPO="${MLFLOW_OPERATOR_REPO:-mlflow-operator}"
-MLFLOW_OPERATOR_BRANCH="${MLFLOW_OPERATOR_BRANCH:-main}"
+# Accept the legacy false setting used by existing Jenkins environments, but fail
+# obsolete injection requests before deploying anything through a different path.
+if [ "${DEPLOY_MLFLOW_OPERATOR:-false}" != "false" ]; then
+    message="DEPLOY_MLFLOW_OPERATOR manifest injection has been retired. Remove this variable and use SKIP_OPERATOR=true to reuse an installed operator, or leave SKIP_OPERATOR=false to deploy from the test image."
+    echo "ERROR: $message" >&2
+    fail_run "test_config" "$message"
+fi
 
 SKIP_DEPLOYMENT="${SKIP_DEPLOYMENT:-false}"
 SKIP_OPERATOR="${SKIP_OPERATOR:-false}"
@@ -1048,22 +1038,6 @@ trap 'cleanup "$?"' EXIT
 trap 'terminate_on_signal 130' INT
 trap 'terminate_on_signal 143' TERM
 
-# ─── CSV patching (OpenShift/OLM) ─────────────────────────────────────────────
-# Done once before the suite loop — the MLflow operator manifests don't change
-# between suites, so there is no need to re-patch the CSV for each storage type.
-# This path applies only when the MLflow operator is embedded inside a platform
-# operator (ODH/RHOAI). When the MLflow operator runs standalone
-# (mlflow-operator-controller-manager), the CSV patch is skipped automatically.
-
-if [ "$DEPLOY_MLFLOW_OPERATOR" = "true" ] && [ "$SKIP_DEPLOYMENT" != "true" ]; then
-    echo "Patching OLM CSV with MLflow operator manifests..."
-    if ! find_csv_and_update "$MLFLOW_OPERATOR_OWNER" "$MLFLOW_OPERATOR_REPO" "$MLFLOW_OPERATOR_BRANCH"; then
-        echo "ERROR: Failed to patch CSV" >&2
-        fail_run "test_patch_csv" "Failed to patch OLM CSV with MLflow operator manifests"
-    fi
-    _OPERATOR_DEPLOYED=true
-fi
-
 # ─── Suite runner ─────────────────────────────────────────────────────────────
 
 setup_rbac() {
@@ -1083,10 +1057,9 @@ setup_rbac() {
         --dry-run=client -o yaml | kubectl apply -f -
 
     # Grant cluster-wide list/watch on mlflowconfigs so the MLflow server can look up
-    # namespace-specific artifact storage configs. The operator's Helm chart creates a
-    # ClusterRoleBinding for this, but in the CSV-patch path OLM may block ClusterRole
-    # creation. Create a self-contained ClusterRole here so we don't depend on
-    # mlflow-view (which may or may not exist) being present in the cluster.
+    # namespace-specific artifact storage configs. Create a self-contained ClusterRole
+    # so the harness also works with installed operators whose RBAC differs from
+    # the manifests in the test image.
     kubectl apply -f - <<EOF
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -1200,10 +1173,8 @@ run_suite_body() {
         [ -n "${CA_BUNDLE_CONFIGMAP:-}" ] && deploy_args+=(--ca-bundle-configmap  "$CA_BUNDLE_CONFIGMAP")
         [ -n "${WORKSPACE_LABEL_SELECTOR:-}" ] && deploy_args+=(--workspace-label-selector "$WORKSPACE_LABEL_SELECTOR")
 
-        # Skip operator when OLM manages it, when explicitly requested, or when it
-        # was already deployed by a previous suite in this run.
-        if [ "$DEPLOY_MLFLOW_OPERATOR" = "true" ] || \
-           [ "$SKIP_OPERATOR" = "true" ] || \
+        # Reuse an installed operator or the one deployed by a previous suite.
+        if [ "$SKIP_OPERATOR" = "true" ] || \
            [ "$_OPERATOR_DEPLOYED" = "true" ]; then
             deploy_args+=(--skip-operator)
         fi

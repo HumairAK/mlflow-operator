@@ -6,7 +6,6 @@ from textwrap import dedent
 from xml.etree.ElementTree import parse
 
 import pytest
-
 from test_write_harness_junit import (
     _mlflow_delete_commands,
     _write_executable,
@@ -89,6 +88,7 @@ def artifact_settings_harness(
     )
     env = os.environ.copy()
     env.pop("DB_TYPE", None)
+    env.pop("DEPLOY_MLFLOW_OPERATOR", None)
     env.update(
         {
             "PATH": f"{fake_bin}{os.pathsep}{env['PATH']}",
@@ -107,7 +107,6 @@ def artifact_settings_harness(
             "SERVE_ARTIFACTS": "false",
             "INFRASTRUCTURE_PLATFORM": "openshift",
             "FORCE_PORT_FORWARD": "false",
-            "DEPLOY_MLFLOW_OPERATOR": "false",
             "SKIP_DEPLOYMENT": "true",
             "SKIP_OPERATOR": "true",
             "SKIP_INFRASTRUCTURE": "true",
@@ -404,3 +403,59 @@ def test_reused_upgrade_keeps_tracking_uri_shape(
     assert exported["artifacts_server"] == "false"
     assert exported["serve_artifacts"] == "true"
     assert exported["artifacts_server_gateway"] == "false"
+
+
+@pytest.mark.parametrize("legacy_mode", [None, "false"])
+@pytest.mark.parametrize("skip_operator", ["false", "true"])
+def test_operator_setup_without_csv_injection(
+    tmp_path: Path,
+    artifact_settings_harness: Callable[..., subprocess.CompletedProcess[str]],
+    legacy_mode: str | None,
+    skip_operator: str,
+) -> None:
+    overrides = {
+        "SKIP_DEPLOYMENT": "false",
+        "SKIP_OPERATOR": skip_operator,
+        "ARTIFACTS_SERVER": "false",
+        "ARTIFACTS_SERVER_GATEWAY": "false",
+    }
+    if legacy_mode is not None:
+        overrides["DEPLOY_MLFLOW_OPERATOR"] = legacy_mode
+    result = artifact_settings_harness(overrides)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    deploy_commands = [
+        line
+        for line in (tmp_path / "uv.log").read_text().splitlines()
+        if "deploy.py" in line
+    ]
+    assert len(deploy_commands) == 1
+    assert ("--skip-operator" in deploy_commands[0]) == (skip_operator == "true")
+    kubectl_commands = (tmp_path / "kubectl.log").read_text().splitlines()
+    assert not any("csv" in line.split() for line in kubectl_commands)
+    assert (tmp_path / "pytest.env").exists()
+
+
+def test_retired_injection_request_fails_before_deployment(
+    tmp_path: Path,
+    artifact_settings_harness: Callable[..., subprocess.CompletedProcess[str]],
+) -> None:
+    result = artifact_settings_harness(
+        {"DEPLOY_MLFLOW_OPERATOR": "true", "SKIP_DEPLOYMENT": "false"}
+    )
+
+    assert result.returncode == 1
+    assert "manifest injection has been retired" in result.stderr
+    assert "SKIP_OPERATOR=true" in result.stderr
+    assert not (tmp_path / "uv.log").exists()
+    assert not (tmp_path / "pytest.env").exists()
+    kubectl_commands = (tmp_path / "kubectl.log").read_text().splitlines()
+    assert all(line.startswith("get ") for line in kubectl_commands)
+    reports = list((tmp_path / "results").glob("xunit_report*.xml"))
+    assert len(reports) == 1
+    case = parse(reports[0]).getroot().find("./testsuite/testcase")
+    assert case is not None
+    assert case.get("name") == "test_config"
+    error = case.find("error")
+    assert error is not None
+    assert "manifest injection has been retired" in error.get("message", "")

@@ -24,6 +24,9 @@ OpenShift as well.
 ```bash
 cd mlflow-tests
 
+# Reuse the operator already installed by RHOAI or ODH for these examples
+export SKIP_OPERATOR=true
+
 # Full run: deploys MLflow, runs tests, cleans up
 bash images/test-run.sh
 
@@ -144,12 +147,19 @@ checks, and garbage-collection checks. Otherwise, these clients follow
 
 ### Operator / OpenShift
 
+The harness deploys the operator from the test image's manifests by default on both
+Kubernetes and OpenShift. Set `SKIP_OPERATOR=true` when using an operator already
+installed by RHOAI or ODH, regardless of its OLM version. Set `SKIP_DEPLOYMENT=true`
+to reuse the existing MLflow instance as well.
+
+CSV-based manifest injection has been retired. `DEPLOY_MLFLOW_OPERATOR=false` is
+accepted for compatibility with existing environments; other nonempty values fail
+with migration guidance and a harness JUnit report. Remove `MLFLOW_OPERATOR_OWNER`,
+`MLFLOW_OPERATOR_REPO`, and `MLFLOW_OPERATOR_BRANCH` from old configurations; these
+manifest-download settings are no longer used.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DEPLOY_MLFLOW_OPERATOR` | `false` | Set to `true` on OpenShift/OLM clusters to patch the CSV instead of deploying via kustomize. |
-| `MLFLOW_OPERATOR_OWNER` | `opendatahub-io` | GitHub owner for CSV manifest download. |
-| `MLFLOW_OPERATOR_REPO` | `mlflow-operator` | GitHub repo name for CSV manifest download. |
-| `MLFLOW_OPERATOR_BRANCH` | `main` | Branch to pull manifests from for CSV patching. |
 | `INFRASTRUCTURE_PLATFORM` | _(auto)_ | Infrastructure overlay: `base` or `openshift`. When unset, the harness inspects `route.openshift.io` and selects `openshift` only if route resources are actually present; otherwise it uses `base`. |
 | `FORCE_PORT_FORWARD` | `false` | Force the harness to port-forward the MLflow service to `localhost:8443` even on OpenShift, instead of using the MLflow CR `status.url`. |
 | `ARTIFACTS_SERVER` | `false` | Enable the dedicated artifact Deployment. Requires PostgreSQL backend/registry stores, one or more `file`, `s3`, or `externals3` backends, and the `HTTPRoute` CRD. Generic Kubernetes normally uses a direct Service port-forward on `localhost:8444`; its split S3 GC row persists the in-cluster artifact Service DNS name and uses the Service TLS port instead. |

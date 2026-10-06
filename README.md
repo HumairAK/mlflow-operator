@@ -660,6 +660,12 @@ For a repo-level map of Red Hat OpenShift AI MLflow fork validation, including
 Jenkins shift-left smoke and upgrade coverage, see the
 [RHOAI MLflow Fork Testing Guide](docs/rhoai-mlflow-testing.md).
 
+The integration harness deploys the operator from the test image's manifests by default.
+Set `SKIP_OPERATOR=true` to reuse an operator installed by RHOAI or ODH, independently
+of its OLM version. CSV-based manifest injection has been retired; existing
+`DEPLOY_MLFLOW_OPERATOR=false` settings remain accepted, while requests to enable
+injection fail with migration guidance. See the [harness documentation](mlflow-tests/images/README.md).
+
 `mlflow-tests` also includes opt-in upgrade-phase pytest modules under:
 
 - `mlflow-tests/tests/upgrade/pre_upgrade/`

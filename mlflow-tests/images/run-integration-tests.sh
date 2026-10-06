@@ -123,7 +123,6 @@ set +e
 docker run "${docker_args[@]}" \
   -v "$HOME/.kube:/mlflow/.kube:ro,z" \
   -v "$(cd "$results_dir" && pwd):/mlflow/results:z" \
-  -e DEPLOY_MLFLOW_OPERATOR=false \
   -e NAMESPACE="$NAMESPACE" \
   -e MLFLOW_OPERATOR_IMAGE="$OPERATOR_RUNTIME_IMAGE" \
   -e MLFLOW_IMAGE="$MLFLOW_RUNTIME_IMAGE" \
