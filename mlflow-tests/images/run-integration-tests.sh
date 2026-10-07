@@ -71,10 +71,11 @@ if [ -n "${PYTEST_MARK_EXPRESSION:-}" ]; then
 fi
 
 docker_args=(--rm --network host)
+hostname_backends="$(printf '%s\n' "$ARTIFACT_BACKENDS" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | paste -sd, -)"
 # MLflow signs SeaweedFS URLs with its in-cluster service endpoint. test-run.sh
 # port-forwards that service to the runner, so make the exact signed-URL host
 # resolve to the runner loopback from this host-networked test container.
-if [[ ",${ARTIFACT_BACKENDS}," == *,s3,* ]]; then
+if [[ ",${hostname_backends}," == *,s3,* ]]; then
   docker_args+=(
     --add-host "minio-service.${NAMESPACE}.svc.cluster.local:127.0.0.1"
   )
@@ -84,7 +85,7 @@ fi
 # host-networked external test container.
 if [ "${ARTIFACTS_SERVER:-false}" = "true" ] && \
    [ "${ARTIFACTS_SERVER_GATEWAY:-false}" != "true" ] && \
-   [[ ",${ARTIFACT_BACKENDS}," == *,s3,* || ",${ARTIFACT_BACKENDS}," == *,externals3,* ]]; then
+   [[ ",${hostname_backends}," == *,s3,* || ",${hostname_backends}," == *,externals3,* ]]; then
   docker_args+=(
     --add-host "mlflow-artifacts.${NAMESPACE}.svc:127.0.0.1"
   )

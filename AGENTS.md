@@ -318,7 +318,10 @@ and keep split artifact-server deployment URLs and forwarded ports aligned. Dire
 split-server suites must refresh harness-owned operator configuration across
 backend changes while honoring explicit `SKIP_OPERATOR=true`. Both `s3` and
 `externals3` need the in-cluster artifact Service URL for GC; map that host in the
-external test launcher, while mapping SeaweedFS only for `s3`.
+external test launcher, while mapping SeaweedFS only for `s3`. Trim backend entries
+for launcher hostname checks while preserving the value passed to the harness.
+Keep `deploy.py --mlflow-url` overrides temporary and restore the overlay params
+even when deployment fails, so later Gateway runs retain their configured URL.
 
 ### MLflow upgrade pytest phases
 

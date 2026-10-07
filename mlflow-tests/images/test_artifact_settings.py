@@ -756,6 +756,10 @@ def test_direct_split_server_never_refreshes_explicitly_reused_operator(
         ("externals3", "false", True, False),
         ("externals3", "true", False, False),
         ("file", "false", False, False),
+        ("file, externals3", "false", True, False),
+        (" file , s3 ", "false", True, True),
+        ("\t s3\t, externals3\n", "false", True, True),
+        ("file, externals3", "true", False, False),
     ],
 )
 def test_test_container_maps_direct_artifact_service_host(
@@ -802,6 +806,7 @@ def test_test_container_maps_direct_artifact_service_host(
 
     assert result.returncode == 0, result.stdout + result.stderr
     args = docker_log.read_text().splitlines()
+    assert f"ARTIFACT_BACKENDS={backend}" in docker_log.read_text()
     assert (
         "mlflow-artifacts.test-namespace.svc:127.0.0.1" in args
     ) == expect_artifact_host
