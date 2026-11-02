@@ -336,7 +336,9 @@ fork's migration-gap and UI-E2E references change.
 
 ### Linting
 
-This repo uses golangci-lint; to ensure linting is successful after code changes, run
+Keep the golangci-lint versions in `Makefile` and `.github/workflows/lint.yml` aligned
+and compatible with the Go version in `go.mod` (currently v2.13.0 for Go 1.26).
+To ensure linting is successful after code changes, run
 
 ```bash
 golangci-lint run

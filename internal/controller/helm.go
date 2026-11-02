@@ -238,10 +238,8 @@ func (h *HelmRenderer) mlflowToHelmValues(
 	//   2. Glob *.crt and *.pem files from each ConfigMap mount path
 	// Mount paths are derived from configMaps in the template via mlflow.caBundleMountPaths
 	var caConfigMaps []map[string]interface{}
-	var caFilePaths []string
-
 	// Always include system CA bundle first
-	caFilePaths = append(caFilePaths, systemCAPath)
+	caFilePaths := []string{systemCAPath}
 
 	// Add platform CA bundle if detected
 	if opts.PlatformTrustedCABundleExists {

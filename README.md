@@ -511,6 +511,8 @@ See the [config/samples](./config/samples/) directory for complete examples:
 
 For API and code-generation changes, use `make generate` and `make manifests`. The Makefile scopes `controller-gen` to the root controller package plus the nested `api/` module so unrelated nested repo copies or temp trees under the workspace do not affect generated output. Keep the Kubernetes dependency versions in the root module and `api/go.mod` aligned so generation runs against the same API types the operator binary uses.
 
+CI and the Makefile use golangci-lint v2.13.0, compatible with the repository’s Go 1.26 requirement. Run `make golangci-lint` to install it, then `bin/golangci-lint run`.
+
 ## Testing
 
 MLflow coverage is split between:
